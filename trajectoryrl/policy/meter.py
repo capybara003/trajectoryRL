@@ -42,6 +42,7 @@ class EpisodeUsage:
     reserved_usd: float = 0.0   # worst-case cost of calls in flight (released when each returns)
     clamped: int = 0            # calls whose max_tokens the meter reduced to fit the cap
     overshoot_usd: float = 0.0  # actual cost above reservation (prompt estimate too low); should stay 0
+    last_call_ts: float = 0.0   # wall clock of the last completed call (policy-stall watchdog)
     rows: list[dict] = field(default_factory=list)   # one per call, for artifacts / provenance
     t0: float = field(default_factory=time.time)
 
@@ -361,7 +362,7 @@ class PolicyMeter:
                 # booked and visible; spent may now sit above cap, which refuses
                 # every further call for the episode.
                 ep.overshoot_usd += usd - reserved
-            ep.spent_usd += usd; ep.calls += 1
+            ep.spent_usd += usd; ep.calls += 1; ep.last_call_ts = time.time()
             ep.by_model[model] = ep.by_model.get(model, 0.0) + usd
             ep.tokens["prompt"] += pt; ep.tokens["cached"] += cached; ep.tokens["completion"] += ct
             if status != 200:

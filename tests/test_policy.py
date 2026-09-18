@@ -345,3 +345,16 @@ async def test_overshoot_is_booked_and_closes_the_cap(meter):
     calls_before = up.calls
     status, body, _ = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}], "max_tokens": 50})
     assert status == 402 and up.calls == calls_before
+
+
+def test_drain_aborts_on_should_abort():
+    from trajectoryrl.utils.sandbox_harness import _drain_exec_stream_with_deadline
+    import itertools
+    def silent():
+        while True:
+            time.sleep(0.2); yield b""
+    killed = []
+    t0 = time.time()
+    chunks, timed_out = _drain_exec_stream_with_deadline(silent(), timeout=30, on_deadline=lambda: killed.append(1),
+                                                        poll_interval_s=0.05, should_abort=lambda: time.time() - t0 > 0.3)
+    assert timed_out and killed == [1] and time.time() - t0 < 5

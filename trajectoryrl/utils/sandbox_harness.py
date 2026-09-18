@@ -51,7 +51,7 @@ from docker.types import LogConfig
 
 from ..utils.config import SPEC_NUMBER, ValidatorConfig
 from ..policy import (
-    EPISODE_CAP_USD, METER_ALIAS, METER_PORT, POLICY_ALIAS, POLICY_PORT,
+    EPISODE_CAP_USD, METER_ALIAS, METER_PORT, POLICY_ALIAS, POLICY_FIRST_CALL_S, POLICY_IDLE_S, POLICY_PORT,
     RUNTIME_FILE, SIDECAR_CPU_QUOTA, SIDECAR_HEALTH_TIMEOUT_S, SIDECAR_MEM_LIMIT,
 )
 from ..policy.meter import PolicyMeter
@@ -332,8 +332,12 @@ def _drain_exec_stream_with_deadline(
     timeout: float,
     on_deadline: Callable[[], None] | None = None,
     poll_interval_s: float = 1.0,
+    should_abort: Callable[[], bool] | None = None,
 ) -> tuple[list[bytes], bool]:
-    """Drain a docker exec_start stream subject to a wall-clock deadline.
+    """Drain a docker exec_start stream subject to a wall-clock deadline
+    and an optional ``should_abort()`` predicate polled every tick (used
+    for the Season 2 policy-stall watchdog: a policy that never answers
+    Hermes would otherwise burn the whole scenario budget).
 
     The docker-py exec_start iterator parks on ``next()`` whenever the
     container produces no stdout (e.g. a Hermes process blocked on an
@@ -394,7 +398,13 @@ def _drain_exec_stream_with_deadline(
     deadline = time.monotonic() + timeout
     while True:
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        aborted = False
+        if remaining > 0 and should_abort is not None:
+            try:
+                aborted = bool(should_abort())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("exec-stream should_abort raised: %s", exc)
+        if remaining <= 0 or aborted:
             timed_out = True
             if on_deadline is not None:
                 try:
@@ -593,6 +603,7 @@ class _EpisodeResult:
     meter: dict = field(default_factory=dict)
     policy_log: str = ""
     policy_setup_s: float | None = None
+    policy_stalled: bool = False
     transcript: str = ""
     turns_log: str = ""
     turns_export_err: str = ""
@@ -2000,13 +2011,42 @@ class TrajectorySandboxHarness:
 
             stream = self.client.api.exec_start(exec_id, stream=True, demux=False)
 
+            # Season 2 policy-stall watchdog: a policy that never completes a
+            # model call (dead, hanging, or refusing everything) must not
+            # burn the scenario's whole budget. Trip if no metered call has
+            # completed POLICY_FIRST_CALL_S after chat start, or none in the
+            # last POLICY_IDLE_S (long tool commands are fine below that).
+            chat_t0 = time.monotonic()
+            stall = {"tripped": False}
+
+            def _policy_stalled() -> bool:
+                u = meter.usage(ep_token)
+                now = time.monotonic()
+                if u is None:
+                    return False
+                if u.calls == 0:
+                    tripped = (now - chat_t0) > POLICY_FIRST_CALL_S
+                else:
+                    tripped = (time.time() - u.last_call_ts) > POLICY_IDLE_S
+                if tripped:
+                    stall["tripped"] = True
+                return tripped
+
             transcript_chunks, episode.timed_out = (
                 _drain_exec_stream_with_deadline(
                     stream,
                     timeout=timeout,
                     on_deadline=lambda: _kill_chat_process(sandbox),
+                    should_abort=_policy_stalled,
                 )
             )
+            if stall["tripped"]:
+                episode.policy_stalled = True
+                logger.warning(
+                    "[%s] %s policy stalled: no completed model call within the "
+                    "watchdog window; chat killed",
+                    session_id, scenario,
+                )
             episode.transcript = b"".join(transcript_chunks).decode(
                 "utf-8", errors="replace",
             )
@@ -2094,6 +2134,7 @@ class TrajectorySandboxHarness:
                 "cost_by_model": episode.cost_by_model,
                 "meter": {k: v for k, v in episode.meter.items() if k != "rows"},
                 "policy_setup_s": episode.policy_setup_s,
+                "policy_stalled": episode.policy_stalled,
                 "verifier_stdout": verifier_result.get("stdout", ""),
                 "ctrf": ctrf,
             }
@@ -2232,13 +2273,24 @@ class TrajectorySandboxHarness:
             log_config=LogConfig(type=LogConfig.types.JSON,
                                  config={"max-size": "20m"}),
         )
-        sidecar.put_archive("/", buf)
-        sidecar.start()
-        # docker-py 7.x cannot set an alias at create time: reconnect with it.
-        net.disconnect(sidecar)
-        net.connect(sidecar, aliases=[POLICY_ALIAS])
-        net.connect(sandbox)
+        try:
+            sidecar.put_archive("/", buf)
+            sidecar.start()
+            # docker-py 7.x cannot set an alias at create time: reconnect with it.
+            net.disconnect(sidecar)
+            net.connect(sidecar, aliases=[POLICY_ALIAS])
+            net.connect(sandbox)
+            self._wait_policy_healthy(sandbox, sidecar)
+        except Exception:
+            # the caller never gets the handles, so tear down here
+            self._stop_policy_sidecar(session_id, scenario, sidecar, net, sandbox)
+            raise
+        setup_s = round(time.time() - t0, 2)
+        logger.info("[%s] %s policy sidecar ready in %.1fs (files=%s, upstream=%s)",
+                    session_id, scenario, setup_s, sorted(policy_files) or ["<default pin>"], upstream)
+        return net, sidecar, setup_s
 
+    def _wait_policy_healthy(self, sandbox: Container, sidecar: Container) -> None:
         deadline = time.time() + SIDECAR_HEALTH_TIMEOUT_S
         url = f"http://{POLICY_ALIAS}:{POLICY_PORT}/v1/models"
         while True:
@@ -2264,10 +2316,6 @@ class TrajectorySandboxHarness:
                     f"{SIDECAR_HEALTH_TIMEOUT_S:.0f}s; policy log tail: {tail!r}"
                 )
             time.sleep(0.5)
-        setup_s = round(time.time() - t0, 2)
-        logger.info("[%s] %s policy sidecar ready in %.1fs (files=%s, upstream=%s)",
-                    session_id, scenario, setup_s, sorted(policy_files) or ["<default pin>"], upstream)
-        return net, sidecar, setup_s
 
     def _policy_log_tail(self, sidecar: Optional[Container], max_bytes: int = 64 * 1024) -> str:
         """The policy's own log (JSONL written by the runtime) plus its

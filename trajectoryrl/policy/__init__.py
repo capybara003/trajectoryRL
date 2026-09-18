@@ -27,6 +27,11 @@ POLICY_ALIAS = "policy"
 SIDECAR_MEM_LIMIT = "1g"
 SIDECAR_CPU_QUOTA = 100000  # 1 CPU
 SIDECAR_HEALTH_TIMEOUT_S = 60.0
+# Policy-stall watchdog: kill the chat if no metered model call has completed
+# this long after chat start, or if none completed in the last POLICY_IDLE_S
+# (the agent's long tool commands must stay under this).
+POLICY_FIRST_CALL_S = 120.0
+POLICY_IDLE_S = 420.0
 
 # Safety cap per episode in USD at the frozen price table. Not a scoring term (Ning 2026-09-18: cost is
 # reported, not scored, at launch); it bounds validator spend against runaway policies. 26 scenarios x $1 =
