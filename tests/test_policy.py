@@ -69,6 +69,8 @@ class _FakeUpstream:
     async def chat(self, req):
         self.calls += 1
         body = await req.json()
+        if "slow" in json.dumps(body.get("messages")):
+            await asyncio.sleep(0.5)          # lets concurrent calls overlap (reservation tests)
         usage = {"prompt_tokens": 100, "completion_tokens": 50, "prompt_tokens_details": {"cached_tokens": 40}}
         if body.get("stream"):
             resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"}); await resp.prepare(req)
@@ -225,3 +227,89 @@ def test_ensure_meter_is_started_once_under_parallel_workers():
     ts = [threading.Thread(target=go) for _ in range(6)]
     [t.start() for t in ts]; [t.join() for t in ts]
     assert len({id(m) for m in seen}) == 1 and seen[0].port > 0
+
+
+# ---------------------------------------------------------------- review fixes (PR #323)
+
+def test_close_drops_episode_and_keeps_memory_bounded():
+    m = PolicyMeter("http://127.0.0.1:1/v1", "k", port=_free_port())
+    toks = [m.mint(f"e{i}") for i in range(50)]
+    for t in toks:
+        assert m.close(t) is not None
+    assert m.episodes == {} and m.close(toks[0]) is None
+
+
+def test_reserve_for_refuses_clamps_and_fits():
+    from trajectoryrl.policy.meter import reserve_for, estimate_prompt_tokens, MIN_MAX_TOKENS
+    body = {"messages": [{"role": "user", "content": "x" * 3000}]}   # ~1000 prompt tokens
+    est = estimate_prompt_tokens(body); assert 1000 <= est <= 1100
+    # plenty of room: requested max_tokens honoured, reservation = prompt + completion worst case
+    r, mt, clamped = reserve_for("kimi-k3", {**body, "max_tokens": 1000}, room_usd=1.0)
+    assert mt == 1000 and not clamped and r == pytest.approx(est * 1.95e-6 + 1000 * 9.75e-6, rel=1e-6)
+    # tight room: max_tokens clamped to what fits
+    r, mt, clamped = reserve_for("kimi-k3", {**body, "max_tokens": 100000}, room_usd=0.01)
+    assert clamped and MIN_MAX_TOKENS <= mt < 100000 and r <= 0.01
+    # no room even for the prompt or for MIN_MAX_TOKENS of completion: refused
+    assert reserve_for("kimi-k3", body, room_usd=0.001)[1] is None
+    assert reserve_for("kimi-k3", body, room_usd=est * 1.95e-6 + 10 * 9.75e-6)[1] is None
+
+
+@pytest.mark.asyncio
+async def test_meter_enforces_cap_before_forwarding_and_reports_budget(meter):
+    m, up = meter
+    tok = m.mint("t/cap", cap_usd=0.0005)          # less than one 8192-token default completion on kimi
+    calls_before = up.calls
+    status, body, hdr = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}]})
+    assert status == 402 and up.calls == calls_before and b"cannot fit" in body
+    # a call that fits after clamping goes through with max_tokens reduced
+    status, body, hdr = await _post(m, tok, {"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "x"}],
+                                             "max_tokens": 1_000_000})
+    assert status == 200
+    u = m.usage(tok)
+    assert u.clamped == 1 and u.rows[-1]["clamped"] and u.rows[-1]["max_tokens"] < 1_000_000
+    assert u.reserved_usd == pytest.approx(0.0)      # reservation released after the call
+    # authoritative budget endpoint
+    async with ClientSession() as cs:
+        async with cs.get(f"http://127.0.0.1:{m.port}/v1/budget", headers={"Authorization": f"Bearer {tok}"}) as r:
+            assert r.status == 200
+            j = await r.json()
+            assert j["remaining_usd"] == pytest.approx(0.0005 - u.spent_usd, abs=1e-6) and j["reserved_usd"] == 0
+        async with cs.get(f"http://127.0.0.1:{m.port}/v1/budget", headers={"Authorization": "Bearer nope"}) as r:
+            assert r.status == 401
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_share_one_reservation_pool(meter):
+    m, up = meter
+    # room for roughly one small call at a time: 3 concurrent flash calls with max_tokens 1000 need
+    # 3 x (~16 prompt tokens x 0.04e-6 + 1000 x 0.08e-6) ~ 3 x 8.1e-5; give room for two
+    tok = m.mint("t/conc", cap_usd=1.7e-4)
+    body = {"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "slow"}], "max_tokens": 1000}
+    results = await asyncio.gather(*[_post(m, tok, dict(body)) for _ in range(3)])
+    statuses = sorted(r[0] for r in results)
+    u = m.usage(tok)
+    # three full reservations (3 x ~8.1e-5) do not fit in 1.7e-4: the meter must have clamped or refused
+    # at least one of the overlapping calls, and the reservation pool is empty again afterwards
+    assert statuses.count(200) >= 2 and (u.clamped >= 1 or statuses.count(402) >= 1)
+    assert u.spent_usd <= 1.7e-4 + 1e-9 and u.reserved_usd == pytest.approx(0.0)
+    assert max(r["max_tokens"] for r in u.rows if r.get("max_tokens")) == 1000 and min(r["max_tokens"] for r in u.rows if r.get("max_tokens")) < 1000
+
+
+def test_read_policy_dir_rejects_binary_and_skips_pyc(tmp_path):
+    from trajectoryrl.base.miner import TrajectoryMiner
+    d = tmp_path / "pol"; d.mkdir()
+    (d / "policy.json").write_text('{"kind": "pin", "model": "glm-5.3-flash"}')
+    (d / "__pycache__").mkdir(); (d / "__pycache__" / "x.cpython-313.pyc").write_bytes(b"\x00\x01")
+    (d / "stale.pyc").write_bytes(b"\x00\x01")
+    assert TrajectoryMiner.read_policy_dir(str(d)) == {"policy.json": '{"kind": "pin", "model": "glm-5.3-flash"}'}
+    (d / "logo.png").write_bytes(b"\x89PNG\x00\xff\xfe")
+    with pytest.raises(ValueError, match="not UTF-8"):
+        TrajectoryMiner.read_policy_dir(str(d))
+
+
+def test_validate_s1_applies_policy_file_rules():
+    from trajectoryrl.base.miner import TrajectoryMiner
+    ok = {"schema_version": 1, "files": {"SKILL.md": "# s", "policy.json": "{}"}}
+    assert TrajectoryMiner.validate_s1(ok) == []
+    bad = {"schema_version": 1, "files": {"SKILL.md": "# s", "../evil.py": "x"}}
+    assert any("policy files" in i for i in TrajectoryMiner.validate_s1(bad))

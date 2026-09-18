@@ -143,8 +143,15 @@ class TrajectoryMiner:
             raise FileNotFoundError(f"policy directory not found: {path}")
         out: Dict[str, str] = {}
         for f in sorted(root.rglob("*")):
-            if f.is_file() and "__pycache__" not in f.parts:
-                out[f.relative_to(root).as_posix()] = f.read_text(encoding="utf-8")
+            if not f.is_file() or "__pycache__" in f.parts or f.suffix in (".pyc", ".pyo"):
+                continue
+            rel = f.relative_to(root).as_posix()
+            try:
+                out[rel] = f.read_text(encoding="utf-8")
+            except UnicodeDecodeError as e:
+                raise ValueError(
+                    f"policy file {rel!r} is not UTF-8 text (binary files cannot go in a pack): {e}"
+                ) from e
         if "policy.py" not in out and "policy.json" not in out:
             raise ValueError("policy directory needs policy.py or policy.json")
         return out
@@ -179,6 +186,15 @@ class TrajectoryMiner:
         size = len(json.dumps(pack, sort_keys=True))
         if size > MAX_PACK_SIZE:
             issues.append(f"pack size {size} bytes exceeds limit ({MAX_PACK_SIZE})")
+
+        # Season 2: the same policy-file rules the validator applies at eval
+        # time (file names, per-file type, total size), so a pack that
+        # validates locally is not skipped on the validator.
+        from ..policy import extract_policy_files
+        try:
+            extract_policy_files(pack)
+        except ValueError as e:
+            issues.append(f"policy files: {e}")
 
         return issues
 

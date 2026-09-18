@@ -39,13 +39,15 @@ class EpisodeUsage:
     refused_model: int = 0
     by_model: dict[str, float] = field(default_factory=dict)
     tokens: dict[str, int] = field(default_factory=lambda: {"prompt": 0, "cached": 0, "completion": 0})
+    reserved_usd: float = 0.0   # worst-case cost of calls in flight (released when each returns)
+    clamped: int = 0            # calls whose max_tokens the meter reduced to fit the cap
     rows: list[dict] = field(default_factory=list)   # one per call, for artifacts / provenance
     t0: float = field(default_factory=time.time)
 
     def summary(self) -> dict[str, Any]:
         return {
             "cost_usd": round(self.spent_usd, 6), "calls": self.calls, "errors": self.errors,
-            "refused_cap": self.refused_cap, "refused_model": self.refused_model,
+            "refused_cap": self.refused_cap, "refused_model": self.refused_model, "clamped": self.clamped,
             "by_model": {m: round(v, 6) for m, v in sorted(self.by_model.items())},
             "tokens": dict(self.tokens), "cap_usd": self.cap_usd,
         }
@@ -74,6 +76,47 @@ def content_fingerprint(content: str, tool_calls: list) -> dict:
         "tool_sha": hashlib.sha256(json.dumps(calls, sort_keys=True).encode()).hexdigest()[:16] if calls else None,
         "tool_n": len(calls),
     }
+
+
+# Worst-case prompt-token estimate from the request body: no cache hits assumed,
+# ~3 characters per token (conservative for code and JSON).
+CHARS_PER_TOKEN = 3.0
+# When a request carries no max_tokens, this is the completion length reserved
+# and clamped to; a policy that needs more must say so and have the budget.
+DEFAULT_MAX_TOKENS = 8192
+MIN_MAX_TOKENS = 64
+
+
+def estimate_prompt_tokens(body: dict) -> int:
+    try:
+        return int(len(json.dumps(body.get("messages") or [], ensure_ascii=False)) / CHARS_PER_TOKEN) + 16
+    except Exception:  # noqa: BLE001
+        return 16
+
+
+def reserve_for(model: str, body: dict, room_usd: float) -> tuple[float, int | None, bool]:
+    """Decide what a call may cost before it is made.
+
+    Returns (reserved_usd, max_tokens_to_send or None if the call must be
+    refused, clamped). The reservation is the worst case: every prompt token
+    at the uncached price plus max_tokens at the completion price. If the
+    requested (or default) completion length does not fit in ``room_usd``,
+    max_tokens is reduced to what fits; below MIN_MAX_TOKENS the call is refused."""
+    p, c, _ = MODEL_PRICES[model]
+    prompt_usd = estimate_prompt_tokens(body) * p
+    if prompt_usd >= room_usd:
+        return 0.0, None, False
+    want = body.get("max_tokens") or body.get("max_completion_tokens") or DEFAULT_MAX_TOKENS
+    try:
+        want = int(want)
+    except (TypeError, ValueError):
+        want = DEFAULT_MAX_TOKENS
+    fits = int((room_usd - prompt_usd) / c) if c > 0 else want
+    if fits < MIN_MAX_TOKENS:
+        return 0.0, None, False
+    clamped = fits < want
+    mt = min(want, fits)
+    return prompt_usd + mt * c, mt, clamped
 
 
 def cost_of(model: str, usage: dict | None) -> tuple[float, int, int, int]:
@@ -118,6 +161,7 @@ class PolicyMeter:
         app.router.add_post("/v1/chat/completions", self._chat)
         app.router.add_get("/v1/models", self._models)
         app.router.add_get("/health", self._health)
+        app.router.add_get("/v1/budget", self._budget)
         runner = web.AppRunner(app, access_log=None)
 
         async def _serve():
@@ -154,14 +198,11 @@ class PolicyMeter:
             return self.episodes.get(token)
 
     def close(self, token: str) -> Optional[EpisodeUsage]:
-        """Retire a token (further calls are refused) and return its usage."""
+        """Retire a token and return its usage. The entry is dropped: a late
+        call with the token gets 401 (unknown token), and nothing is kept
+        in the meter, so memory stays bounded by the in-flight episodes."""
         with self._lock:
-            ep = self.episodes.pop(token, None)
-        if ep is not None:
-            ep.cap_usd = min(ep.cap_usd, ep.spent_usd)  # any late call is refused as over cap
-            with self._lock:
-                self.episodes[f"closed-{token}"] = ep
-        return ep
+            return self.episodes.pop(token, None)
 
     # ------------------------------------------------------------------ HTTP handlers (meter loop)
     def _ep(self, request: web.Request) -> Optional[EpisodeUsage]:
@@ -175,23 +216,52 @@ class PolicyMeter:
     async def _health(self, request):
         return web.json_response({"ok": True, "episodes": len(self.episodes)})
 
+    async def _budget(self, request: web.Request):
+        """Authoritative remaining budget for the caller's episode. A streamed
+        response's budget header is computed before the call (headers cannot
+        change after the stream starts), so the runtime asks here after each
+        streamed call."""
+        ep = self._ep(request)
+        if ep is None:
+            return web.json_response({"error": {"message": "unknown or closed episode token", "type": "auth"}}, status=401)
+        with self._lock:
+            return web.json_response({"cap_usd": ep.cap_usd, "spent_usd": round(ep.spent_usd, 6),
+                                      "reserved_usd": round(ep.reserved_usd, 6),
+                                      "remaining_usd": round(max(0.0, ep.cap_usd - ep.spent_usd - ep.reserved_usd), 6)})
+
     async def _chat(self, request: web.Request):
         ep = self._ep(request)
         if ep is None:
             return web.json_response({"error": {"message": "unknown or closed episode token", "type": "auth"}}, status=401)
         body = await request.json()
         model = body.get("model"); stream = bool(body.get("stream"))
-        remaining = max(0.0, ep.cap_usd - ep.spent_usd)
-        hdr_rem = {"x-trajrl-budget-remaining-usd": f"{remaining:.6f}"}
+        hdr_rem = {"x-trajrl-budget-remaining-usd": f"{max(0.0, ep.cap_usd - ep.spent_usd - ep.reserved_usd):.6f}"}
         if model not in MODEL_PRICES:
             ep.refused_model += 1
             return web.json_response({"error": {"message": f"model {model!r} is not in the allowlist {sorted(MODEL_PRICES)}",
                                                 "type": "allowlist"}}, status=400, headers=hdr_rem)
-        if ep.spent_usd >= ep.cap_usd:
-            ep.refused_cap += 1
+        # Reserve the worst case for this call (prompt at list price + max_tokens
+        # at the completion price) against what is left after every other call
+        # in flight has reserved its own. The cap is a bound, not a suggestion:
+        # nothing is forwarded that could push the episode past it.
+        with self._lock:
+            room = ep.cap_usd - ep.spent_usd - ep.reserved_usd
+            reserved, mt, clamped = reserve_for(model, body, room)
+            if mt is None:
+                ep.refused_cap += 1
+                refuse = True
+            else:
+                refuse = False
+                ep.reserved_usd += reserved
+                if clamped:
+                    ep.clamped += 1
+                body["max_tokens"] = mt
+                body.pop("max_completion_tokens", None)
+        if refuse:
             self._row(ep, dict(ts=round(time.time(), 3), model=model, status=402, usd=0.0, err="cap"))
-            return web.json_response({"error": {"message": f"episode safety cap ${ep.cap_usd:.2f} reached", "type": "cap"}},
-                                     status=402, headers={"x-trajrl-budget-remaining-usd": "0"})
+            return web.json_response({"error": {"message": f"episode safety cap ${ep.cap_usd:.2f}: this call cannot fit "
+                                                           f"(remaining ${max(0.0, room):.4f})", "type": "cap"}},
+                                     status=402, headers={"x-trajrl-budget-remaining-usd": f"{max(0.0, room):.6f}"})
         if stream:
             body.setdefault("stream_options", {})["include_usage"] = True
         hdr = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
@@ -267,6 +337,7 @@ class PolicyMeter:
         if status == 200 and usage is None and err is None:
             err = "no-usage"
         with self._lock:
+            ep.reserved_usd = max(0.0, ep.reserved_usd - reserved)
             ep.spent_usd += usd; ep.calls += 1
             ep.by_model[model] = ep.by_model.get(model, 0.0) + usd
             ep.tokens["prompt"] += pt; ep.tokens["cached"] += cached; ep.tokens["completion"] += ct
@@ -275,7 +346,7 @@ class PolicyMeter:
         if not stream:
             resp.headers["x-trajrl-budget-remaining-usd"] = f"{max(0.0, ep.cap_usd - ep.spent_usd):.6f}"
         self._row(ep, dict(ts=round(t0, 3), model=model, status=status, stream=stream, prompt=pt, cached=cached,
-                           completion=ct, finish=finish, err=err, retries=retries, ttfb=ttfb,
+                           completion=ct, finish=finish, err=err, retries=retries, ttfb=ttfb, max_tokens=mt, clamped=clamped,
                            s=round(time.time() - t0, 3), usd=round(usd, 8), **fp))
         return resp
 

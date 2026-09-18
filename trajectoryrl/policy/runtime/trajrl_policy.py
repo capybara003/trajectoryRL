@@ -323,6 +323,17 @@ class Server:
             except ValueError:
                 pass
 
+    async def refresh_budget(self) -> None:
+        """Ask the meter for the authoritative remaining budget (a streamed
+        response's header is computed before the call)."""
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=5)) as cs:
+                async with cs.get(f"{UPSTREAM_URL}/budget", headers=self.hdr) as r:
+                    if r.status == 200:
+                        self.remaining_usd = float((await r.json()).get("remaining_usd"))
+        except Exception:  # noqa: BLE001
+            pass
+
     async def upstream(self, req: dict, sess: dict) -> UpstreamResponse:
         stream = bool(req.get("stream"))
         if stream:
@@ -333,7 +344,7 @@ class Server:
             up = await cs.post(f"{UPSTREAM_URL}/chat/completions", json=req, headers=self.hdr)
             self.note_budget(up.headers)
             if up.status in (429, 503) and retries < 6:
-                await up.read(); retries += 1; await asyncio.sleep(1.5 * retries); continue
+                await up.read(); up.release(); retries += 1; await asyncio.sleep(1.5 * retries); continue
             if up.status != 200 or not stream:
                 body = await up.read(); await cs.close()
                 r = UpstreamResponse(up.status, dict(up.headers), False, body=body)
@@ -346,7 +357,7 @@ class Server:
                 return r
             first = await up.content.readany()
             if (b'"error"' in first[:400] or b"concurrency" in first[:400]) and retries < 8:
-                retries += 1; await asyncio.sleep(2.0 * retries); continue
+                up.close(); retries += 1; await asyncio.sleep(2.0 * retries); continue   # drop the pooled connection
 
             async def _release(up=up, cs=cs):
                 up.release(); await cs.close()
@@ -404,6 +415,7 @@ class Server:
             await resp.write_eof()
         finally:
             await result.release()
+        await self.refresh_budget()
         sess["last_finish"] = finish
         log(event="turn", session=sk, turn=sess["turn"], model=model, status=200, finish=finish, usage=usage,
             s=round(time.time() - t0, 2), remaining_usd=self.remaining_usd)
