@@ -210,7 +210,11 @@ The Season 1 rules apply to every string in the pack, not only SKILL.md: no hard
 scenario-name dispatch, no verifier internals, no obfuscated code. In addition:
 
 - **Provenance.** Assistant messages the harness receives must come from model calls the meter saw. A policy
-  may select, truncate, combine and reorder model output; it may not author it. (Enforced in shadow mode at
-  launch: flagged, not scored.)
+  may select, truncate, combine and reorder model output; it may not author it. The meter fingerprints every
+  model answer (text and tool calls) and the validator compares them with what Hermes recorded; the per-episode
+  coverage travels with the score. Shadow mode at launch: recorded and visible, not scored. Measured on the
+  baseline runs above (156 episodes): pass-through and adviser policies score 1.0 on all but 2 episodes, where
+  Hermes itself repaired one malformed tool-call JSON or normalised one message (coverage 0.91 and 0.93). The
+  review threshold is coverage below 0.8, not below 1.0.
 - Off-allowlist models are impossible by construction (network isolation + allowlist).
 - The safety cap ends an episode's model calls at $1.00; whatever the agent had written is verified.
