@@ -272,7 +272,7 @@ async def run_evaluation(args) -> int:
             "sandbox_version": harness.sandbox_version,
             "spec_number": SPEC_NUMBER,
             "scenarios": result.scenarios,
-            "model": config.llm_model,
+            "model": f"policy:auto (default {config.llm_model})",
             "evaluation": {
                 "final_score": round(sr.final_score, 4),
                 "mean_quality": round(sr.mean_quality, 4),

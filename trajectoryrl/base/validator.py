@@ -355,7 +355,7 @@ class TrajectoryValidator:
                     bench_image_hash=self._sandbox_harness.bench_image_hash,
                     harness_image_hash=self._sandbox_harness.scenario_image_hash,
                     bench_version=self._sandbox_harness.sandbox_version,
-                    llm_model=self.config.llm_model,
+                    llm_model=f"policy:auto (default {self.config.llm_model})",
                     llm_base_url=self.config.llm_base_url,
                 )
             except Exception as e:
@@ -850,7 +850,7 @@ class TrajectoryValidator:
                 spec_number=eval_spec,
                 harness_name=self._sandbox_harness.harness_name,
                 harness_version=self._sandbox_harness.harness_version,
-                llm_model=self.config.llm_model,
+                llm_model=f"policy:auto (default {self.config.llm_model})",
             )
             asyncio.run_coroutine_threadsafe(coro, loop)
 
@@ -1174,7 +1174,7 @@ class TrajectoryValidator:
             scenario_results=scenario_results or None,
             spec_number=eval_spec,
             llm_base_url=self.config.llm_base_url,
-            llm_model=self.config.llm_model,
+            llm_model=f"policy:auto (default {self.config.llm_model})",
             judge_model=self.config.judge_model or None,
             **self._harness_metadata(),
         )
