@@ -1,6 +1,18 @@
-# Season 2: Routing Policies
+# Season 2 (transition): Routing Policies
 
 **Subnet**: SN11 (TrajectoryRL)
+**Status**: TRANSITION SEASON. Season 2 is a bridge, not the destination.
+
+> **Where SN11 is going.** SN11 will become **RSI infrastructure**: a platform where emission pays for
+> verifiable agent runs on Engy, miners author and fund the agents, and validators run a replayable
+> orchestrator that dispatches work against automatically verified objectives (formalized mathematics,
+> benchmark tasks, Engy's own serving stack). That rebuild takes longer than we are willing to leave the
+> current SKILL.md contest running, so Season 2 reuses the Season 1 harness, scenarios, verifier and
+> consensus unchanged and changes only the object of competition: the miner's **routing policy** over
+> the Engy model catalog. Expect Season 2 to be superseded when the RSI platform launches; the policies
+> written for it remain useful, because a good routing policy is exactly the per-request "auto" model
+> Engy will serve.
+
 **Scoring**: programmatic verifier, quality summed across the active scenario set (unchanged from Season 1)
 **Spec**: 25 (same 26 scenarios as SPEC 24; new testee: your routing policy)
 

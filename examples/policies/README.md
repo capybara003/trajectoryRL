@@ -1,4 +1,6 @@
-# Example routing policies (Season 2)
+# Example routing policies (Season 2, the transition season)
+
+Season 2 is a transition: same harness, scenarios and consensus as Season 1, new competition object (routing policies). SN11's next stage is RSI infrastructure (see docs/ROUTING_POLICY.md).
 
 Each directory is the non-SKILL.md part of a pack. Build a pack with your SKILL.md plus these files:
 
