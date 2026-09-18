@@ -79,8 +79,11 @@ Your policy sees only the request stream (the full conversation Hermes sends on 
 | kimi-k3 | 1.95 | 9.75 | 0.195 |
 
 Any other model name is refused (HTTP 400). The $1.00 safety cap is enforced **before** a call is forwarded:
-the meter reserves the worst case for the call (every prompt token at list price plus `max_tokens` at the
-completion price, no cache assumed) against what is left after the other calls in flight have reserved theirs.
+the meter reserves the worst case for the call (every billed input field, messages and tools included, at
+list price with no cache assumed, ASCII at 3 characters per token and non-ASCII at one token per character with
+a 1.25x safety factor, plus `max_tokens` at the completion price) against what is left after the other calls in
+flight have reserved theirs. If a call still bills more input than reserved, the excess is booked as
+`overshoot_usd` and the episode is closed to further calls.
 If the requested completion length does not fit, `max_tokens` is reduced to what fits (the call row records
 `clamped`); if fewer than 64 completion tokens fit, the call is refused (HTTP 402). A request without
 `max_tokens` is treated as 8192. So near the cap a policy sees shorter answers first and refusals last, and the

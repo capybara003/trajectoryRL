@@ -313,3 +313,33 @@ def test_validate_s1_applies_policy_file_rules():
     assert TrajectoryMiner.validate_s1(ok) == []
     bad = {"schema_version": 1, "files": {"SKILL.md": "# s", "../evil.py": "x"}}
     assert any("policy files" in i for i in TrajectoryMiner.validate_s1(bad))
+
+
+def test_prompt_estimate_counts_tools_and_non_ascii():
+    from trajectoryrl.policy.meter import estimate_prompt_tokens
+    base = {"model": "kimi-k3", "messages": [{"role": "user", "content": "x" * 300}], "stream": True, "max_tokens": 5}
+    e0 = estimate_prompt_tokens(base)
+    with_tools = {**base, "tools": [{"type": "function", "function": {"name": "t", "parameters": {"schema": "y" * 3000}}}]}
+    assert estimate_prompt_tokens(with_tools) > e0 + 1000          # tools are billed input
+    cjk = {**base, "messages": [{"role": "user", "content": "\u4e2d" * 300}]}
+    assert estimate_prompt_tokens(cjk) >= 300 * 1.25                # one token per CJK character, with safety factor
+    assert estimate_prompt_tokens({**base, "max_tokens": 100000}) == e0   # generation knobs are not billed input
+
+
+@pytest.mark.asyncio
+async def test_overshoot_is_booked_and_closes_the_cap(meter):
+    m, up = meter
+    # fake upstream bills 100 prompt tokens whatever we send; a 1-char prompt reserves far less -> overshoot recorded
+    tok = m.mint("t/over", cap_usd=0.00003)
+    status, body, _ = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}], "max_tokens": 64})
+    assert status == 200
+    for _ in range(100):
+        u = m.usage(tok)
+        if u.calls == 1:
+            break
+        await asyncio.sleep(0.01)
+    assert u.overshoot_usd > 0 and u.summary()["overshoot_usd"] > 0
+    # spent is now above the cap: the next call is refused before forwarding
+    calls_before = up.calls
+    status, body, _ = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}], "max_tokens": 64})
+    assert status == 402 and up.calls == calls_before

@@ -41,6 +41,7 @@ class EpisodeUsage:
     tokens: dict[str, int] = field(default_factory=lambda: {"prompt": 0, "cached": 0, "completion": 0})
     reserved_usd: float = 0.0   # worst-case cost of calls in flight (released when each returns)
     clamped: int = 0            # calls whose max_tokens the meter reduced to fit the cap
+    overshoot_usd: float = 0.0  # actual cost above reservation (prompt estimate too low); should stay 0
     rows: list[dict] = field(default_factory=list)   # one per call, for artifacts / provenance
     t0: float = field(default_factory=time.time)
 
@@ -48,6 +49,7 @@ class EpisodeUsage:
         return {
             "cost_usd": round(self.spent_usd, 6), "calls": self.calls, "errors": self.errors,
             "refused_cap": self.refused_cap, "refused_model": self.refused_model, "clamped": self.clamped,
+            "overshoot_usd": round(self.overshoot_usd, 6),
             "by_model": {m: round(v, 6) for m, v in sorted(self.by_model.items())},
             "tokens": dict(self.tokens), "cap_usd": self.cap_usd,
         }
@@ -78,9 +80,21 @@ def content_fingerprint(content: str, tool_calls: list) -> dict:
     }
 
 
-# Worst-case prompt-token estimate from the request body: no cache hits assumed,
-# ~3 characters per token (conservative for code and JSON).
+# Worst-case prompt-token estimate from the request body: no cache hits assumed.
+# Every billed field counts (messages, tools/functions, response_format, system
+# fields...), so the whole body is measured minus the generation knobs. ASCII
+# is taken at ~3 characters per token (conservative for code and JSON); every
+# non-ASCII character counts as a full token (CJK is ~1 token/char); a 1.25x
+# safety factor covers tokenizer differences. After the call the real
+# usage.prompt_tokens is reconciled against the estimate and any shortfall is
+# booked as overshoot (observable per episode) and closes the cap for the
+# rest of the episode.
 CHARS_PER_TOKEN = 3.0
+NON_ASCII_TOKENS_PER_CHAR = 1.0
+PROMPT_SAFETY = 1.25
+_UNBILLED_KEYS = frozenset({"stream", "stream_options", "max_tokens", "max_completion_tokens", "temperature",
+                            "top_p", "n", "seed", "user", "model", "logprobs", "top_logprobs", "presence_penalty",
+                            "frequency_penalty", "stop", "parallel_tool_calls", "tool_choice", "reasoning_effort"})
 # When a request carries no max_tokens, this is the completion length reserved
 # and clamped to; a policy that needs more must say so and have the budget.
 DEFAULT_MAX_TOKENS = 8192
@@ -89,9 +103,13 @@ MIN_MAX_TOKENS = 64
 
 def estimate_prompt_tokens(body: dict) -> int:
     try:
-        return int(len(json.dumps(body.get("messages") or [], ensure_ascii=False)) / CHARS_PER_TOKEN) + 16
+        billed = {k: v for k, v in body.items() if k not in _UNBILLED_KEYS}
+        text = json.dumps(billed, ensure_ascii=False, separators=(",", ":"))
     except Exception:  # noqa: BLE001
         return 16
+    non_ascii = sum(1 for ch in text if ord(ch) > 127)
+    ascii_chars = len(text) - non_ascii
+    return int((ascii_chars / CHARS_PER_TOKEN + non_ascii * NON_ASCII_TOKENS_PER_CHAR) * PROMPT_SAFETY) + 16
 
 
 def reserve_for(model: str, body: dict, room_usd: float) -> tuple[float, int | None, bool]:
@@ -338,6 +356,11 @@ class PolicyMeter:
             err = "no-usage"
         with self._lock:
             ep.reserved_usd = max(0.0, ep.reserved_usd - reserved)
+            if usd > reserved:
+                # the estimate was low (tokenizer denser than assumed): the excess is
+                # booked and visible; spent may now sit above cap, which refuses
+                # every further call for the episode.
+                ep.overshoot_usd += usd - reserved
             ep.spent_usd += usd; ep.calls += 1
             ep.by_model[model] = ep.by_model.get(model, 0.0) + usd
             ep.tokens["prompt"] += pt; ep.tokens["cached"] += cached; ep.tokens["completion"] += ct
