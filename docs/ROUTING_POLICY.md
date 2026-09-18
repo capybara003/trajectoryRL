@@ -78,8 +78,16 @@ Your policy sees only the request stream (the full conversation Hermes sends on 
 | glm-5.3 | 0.98 | 3.08 | 0.18 |
 | kimi-k3 | 1.95 | 9.75 | 0.195 |
 
-Any other model name is refused (HTTP 400). A call after the episode has spent $1.00 is refused (HTTP 402);
-the remaining budget is on every response as `x-trajrl-budget-remaining-usd`.
+Any other model name is refused (HTTP 400). The $1.00 safety cap is enforced **before** a call is forwarded:
+the meter reserves the worst case for the call (every prompt token at list price plus `max_tokens` at the
+completion price, no cache assumed) against what is left after the other calls in flight have reserved theirs.
+If the requested completion length does not fit, `max_tokens` is reduced to what fits (the call row records
+`clamped`); if fewer than 64 completion tokens fit, the call is refused (HTTP 402). A request without
+`max_tokens` is treated as 8192. So near the cap a policy sees shorter answers first and refusals last, and the
+episode can never overspend. `x-trajrl-budget-remaining-usd` on every response is the budget left after the
+call's reservation; for streamed calls it is computed before the tokens flow, so the authoritative number is
+`GET /v1/budget` (same bearer token), which the SDK queries after every streamed call to keep
+`ctx.remaining_usd` current.
 
 ---
 
@@ -136,6 +144,8 @@ See `examples/policies/sdk_custom/policy.py` for a complete example.
 | `POLICY_DIR` | where your files are (`/policy`) |
 | `DEFAULT_MODEL` | the Season 1 testee model, for reference |
 
+The meter also serves `GET /v1/budget` (bearer `EPISODE_TOKEN`): `{cap_usd, spent_usd, reserved_usd, remaining_usd}`.
+
 Serve `POST /v1/chat/completions` (streaming and non-streaming) and `GET /v1/models` (health) on
 `POLICY_PORT`; call `UPSTREAM_URL/chat/completions` with `Authorization: Bearer $EPISODE_TOKEN`. Python 3.13
 with `aiohttp` and `httpx` is available; nothing can be installed at run time (no network).
@@ -175,7 +185,8 @@ with `aiohttp` and `httpx` is available; nothing can be installed at run time (n
 Build and test locally:
 
 ```bash
-trajectoryrl-miner build SKILL.md --policy ./my_policy -o pack.json
+trajectoryrl-miner build SKILL.md --policy ./my_policy -o pack.json   # text files only; .pyc and __pycache__ skipped
+trajectoryrl-miner validate pack.json                                  # same policy-file rules the validator applies
 LLM_API_KEY=<your engy key> python scripts/eval_pack.py --pack pack.json -o ./eval_output
 trajectoryrl-miner web-submit pack.json
 ```
