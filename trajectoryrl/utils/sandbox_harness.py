@@ -2245,6 +2245,18 @@ class TrajectorySandboxHarness:
             rc, out = sandbox.exec_run(["curl", "-s", "-m", "2", url])
             if rc == 0 and b"data" in out:
                 break
+            try:
+                sidecar.reload()
+                if sidecar.status != "running":   # crashed at start: fail now, not after the timeout
+                    tail = self._policy_log_tail(sidecar)[-1500:]
+                    raise RuntimeError(
+                        f"policy sidecar exited (status={sidecar.status}) before answering {url}; "
+                        f"policy log tail: {tail!r}"
+                    )
+            except RuntimeError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
             if time.time() > deadline:
                 tail = self._policy_log_tail(sidecar)[-1500:]
                 raise RuntimeError(
