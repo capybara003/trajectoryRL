@@ -242,7 +242,7 @@ def test_close_drops_episode_and_keeps_memory_bounded():
 def test_reserve_for_refuses_clamps_and_fits():
     from trajectoryrl.policy.meter import reserve_for, estimate_prompt_tokens, MIN_MAX_TOKENS
     body = {"messages": [{"role": "user", "content": "x" * 3000}]}   # ~1000 prompt tokens
-    est = estimate_prompt_tokens(body); assert 1000 <= est <= 1100
+    est = estimate_prompt_tokens(body); assert 1000 <= est <= 1400   # ~1012 chars/3 x 1.25 safety + 16
     # plenty of room: requested max_tokens honoured, reservation = prompt + completion worst case
     r, mt, clamped = reserve_for("kimi-k3", {**body, "max_tokens": 1000}, room_usd=1.0)
     assert mt == 1000 and not clamped and r == pytest.approx(est * 1.95e-6 + 1000 * 9.75e-6, rel=1e-6)
@@ -330,8 +330,10 @@ def test_prompt_estimate_counts_tools_and_non_ascii():
 async def test_overshoot_is_booked_and_closes_the_cap(meter):
     m, up = meter
     # fake upstream bills 100 prompt tokens whatever we send; a 1-char prompt reserves far less -> overshoot recorded
-    tok = m.mint("t/over", cap_usd=0.00003)
-    status, body, _ = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}], "max_tokens": 64})
+    # reservation for this call: ~34 prompt tokens + 50 completion on kimi ~ 5.5e-4 (cap 7e-4 leaves >= 64 tokens of room); the fake bills 100 prompt
+    # tokens (60 uncached + 40 cached) + 50 completion ~ 6.1e-4 -> overshoot ~4e-5, and spent ends above the cap
+    tok = m.mint("t/over", cap_usd=0.0007)
+    status, body, _ = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}], "max_tokens": 50})
     assert status == 200
     for _ in range(100):
         u = m.usage(tok)
@@ -341,5 +343,5 @@ async def test_overshoot_is_booked_and_closes_the_cap(meter):
     assert u.overshoot_usd > 0 and u.summary()["overshoot_usd"] > 0
     # spent is now above the cap: the next call is refused before forwarding
     calls_before = up.calls
-    status, body, _ = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}], "max_tokens": 64})
+    status, body, _ = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}], "max_tokens": 50})
     assert status == 402 and up.calls == calls_before
