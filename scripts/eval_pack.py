@@ -220,6 +220,10 @@ async def run_evaluation(args) -> int:
             pack_hash=pack_hash,
             validator_salt=validator_salt,
             policy_files=policy_files,
+            scenarios=(
+                [x.strip() for x in args.scenarios.split(",") if x.strip()]
+                if getattr(args, "scenarios", None) else None
+            ),
         )
     except Exception as e:
         logger.error("S1 evaluation failed: %s", e, exc_info=True)
@@ -315,6 +319,10 @@ def main():
     parser.add_argument(
         "--seed", type=int, default=None,
         help="Override epoch seed (default: derived from pack hash)",
+    )
+    parser.add_argument(
+        "--scenarios", default=None,
+        help="Comma-separated subset of the spec's scenarios to run (default: all)",
     )
     parser.add_argument(
         "--no-pull", action="store_true",
