@@ -78,7 +78,8 @@ def cmd_build(args):
         return 1
 
     policy_files = None
-    if getattr(args, "policy", None):
+    policy_dir = getattr(args, "policy", None)
+    if isinstance(policy_dir, str) and policy_dir:
         try:
             policy_files = TrajectoryMiner.read_policy_dir(args.policy)
         except (FileNotFoundError, ValueError) as e:

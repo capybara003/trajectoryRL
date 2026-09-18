@@ -129,7 +129,14 @@ async def test_meter_allowlist_and_cost_and_cap(meter):
     # stream call: usage parsed off the SSE tail
     status, body, hdr = await _post(m, tok, {"model": "glm-5.3-flash", "messages": [], "stream": True})
     assert status == 200 and b"data: [DONE]" in body
-    u = m.usage(tok); assert u.calls == 2 and "glm-5.3-flash" in u.by_model and u.tokens["completion"] == 100
+    # the client sees [DONE] a moment before the meter thread finishes its accounting: poll briefly
+    for _ in range(100):
+        u = m.usage(tok)
+        if u.calls == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert u.calls == 2 and "glm-5.3-flash" in u.by_model and u.tokens["completion"] == 100
+    assert u.rows[-1]["content_sha"] and u.rows[-1]["content_len"] == 2   # provenance fingerprint recorded
     # cap: force it and expect 402 with no upstream call
     u.spent_usd = 1.0; calls_before = up.calls
     status, body, hdr = await _post(m, tok, {"model": "kimi-k3", "messages": []})
@@ -190,3 +197,31 @@ def test_policy_from_config(rt):
 def test_allowlist_is_the_prod_catalog():
     assert set(MODEL_ALLOWLIST) == {"deepseek-v4-flash-0731", "deepseek-v4.1-flash", "glm-5.2", "glm-5.3",
                                     "glm-5.3-flash", "kimi-k3", "qwen3.6-35b-a3b", "qwen3.8-27b"}
+
+
+def test_meter_falls_back_to_ephemeral_port_when_busy():
+    busy = socket.socket(); busy.bind(("0.0.0.0", 0)); busy.listen(1); port = busy.getsockname()[1]
+    try:
+        m = PolicyMeter("http://127.0.0.1:1/v1", "k", port=port)
+        m.start()
+        assert m.port != port and m.port > 0
+    finally:
+        busy.close()
+
+
+def test_ensure_meter_is_started_once_under_parallel_workers():
+    import threading
+    from trajectoryrl.utils import sandbox_harness as SH
+    from trajectoryrl.utils.config import ValidatorConfig
+    import tempfile, pathlib
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    cfg = ValidatorConfig(llm_api_key="k", pack_cache_dir=tmp / "p", log_dir=tmp / "l",
+                          eval_state_path=tmp / "e.json", winner_state_path=tmp / "w.json",
+                          pack_first_seen_path=tmp / "f.json", active_set_dir=tmp / "a")
+    h = SH.TrajectorySandboxHarness(cfg)
+    seen = []
+    def go():
+        seen.append(h._ensure_meter())
+    ts = [threading.Thread(target=go) for _ in range(6)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len({id(m) for m in seen}) == 1 and seen[0].port > 0

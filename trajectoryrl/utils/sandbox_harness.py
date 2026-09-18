@@ -965,6 +965,44 @@ def _looks_like_provider_failure(episodes: List["_EpisodeResult"]) -> bool:
     return True
 
 
+def _provenance(turns_log: str, meter_rows: List[dict]) -> dict:
+    """Shadow provenance check (Season 2): every assistant message Hermes
+    recorded should be the content of some model call the meter saw. A
+    policy may select or pass model output through; a policy that authors
+    assistant text or tool calls itself produces messages with no matching
+    fingerprint. Recorded in artifacts and the payload; NOT scored.
+
+    Returns {"total", "matched", "unmatched": [idx...], "coverage"}."""
+    from ..policy.meter import content_fingerprint
+    sess = _last_session_obj(turns_log) or {}
+    msgs = sess.get("messages") or []
+    seen_c = {r.get("content_sha") for r in meter_rows if r.get("content_sha")}
+    seen_t = {r.get("tool_sha") for r in meter_rows if r.get("tool_sha")}
+    total = 0; matched = 0; unmatched: List[int] = []
+    for i, m in enumerate(msgs):
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        content = m.get("content") if isinstance(m.get("content"), str) else ""
+        tcs = m.get("tool_calls") or []
+        if isinstance(tcs, str):
+            try:
+                tcs = json.loads(tcs)
+            except Exception:  # noqa: BLE001
+                tcs = []
+        fp = content_fingerprint(content, tcs if isinstance(tcs, list) else [])
+        if not fp["content_sha"] and not fp["tool_sha"]:
+            continue
+        total += 1
+        ok_c = (fp["content_sha"] is None) or (fp["content_sha"] in seen_c)
+        ok_t = (fp["tool_sha"] is None) or (fp["tool_sha"] in seen_t)
+        if ok_c and ok_t:
+            matched += 1
+        else:
+            unmatched.append(i)
+    return {"total": total, "matched": matched, "unmatched": unmatched[:50],
+            "coverage": round(matched / total, 4) if total else None}
+
+
 def _last_session_obj(turns_log: str) -> dict | None:
     """Return the last non-empty JSON object in a turns.jsonl blob.
 
@@ -1134,6 +1172,7 @@ class TrajectorySandboxHarness:
         # process) and the validator's own container handle when we run
         # inside docker (the meter is then reached over a network alias).
         self._meter: Optional[PolicyMeter] = None
+        self._meter_lock = threading.Lock()
         self._self_container: Optional[Container] = None
         self._self_container_checked = False
         self.bench_image_hash: str = "unknown"
@@ -2033,6 +2072,10 @@ class TrajectorySandboxHarness:
                 episode.cost_by_model = dict(usage.by_model)
                 episode.meter = usage.summary()
                 episode.meter["rows"] = usage.rows
+                try:
+                    episode.meter["provenance"] = _provenance(episode.turns_log, usage.rows)
+                except Exception as e:  # noqa: BLE001
+                    episode.meter["provenance"] = {"error": str(e)}
             episode.policy_log = self._policy_log_tail(sidecar)
 
             episode.judge_result = {
@@ -2093,11 +2136,12 @@ class TrajectorySandboxHarness:
         """Start the metering proxy once per process (thread-safe enough:
         first episode of the first session starts it before the pool
         fans out; later calls return the same instance)."""
-        if self._meter is None:
-            meter = PolicyMeter(self._testee_api_url, self._testee_api_key, port=METER_PORT)
-            meter.start()
-            self._meter = meter
-        return self._meter
+        with self._meter_lock:   # parallel scenario workers race here on the first session
+            if self._meter is None:
+                meter = PolicyMeter(self._testee_api_url, self._testee_api_key, port=METER_PORT)
+                meter.start()
+                self._meter = meter
+            return self._meter
 
     def _own_container(self) -> Optional[Container]:
         """The validator's own container when running inside docker (the
@@ -2135,13 +2179,14 @@ class TrajectorySandboxHarness:
                     "trajectoryrl.session": session_id,
                     "trajectoryrl.scenario": scenario},
         )
+        meter_port = self._ensure_meter().port
         own = self._own_container()
         if own is not None:
             net.connect(own, aliases=[METER_ALIAS])
-            upstream = f"http://{METER_ALIAS}:{METER_PORT}/v1"
+            upstream = f"http://{METER_ALIAS}:{meter_port}/v1"
         else:
             gw = net.attrs["IPAM"]["Config"][0]["Gateway"]
-            upstream = f"http://{gw}:{METER_PORT}/v1"
+            upstream = f"http://{gw}:{meter_port}/v1"
 
         runtime_src = RUNTIME_FILE.read_bytes()
         buf = io.BytesIO()

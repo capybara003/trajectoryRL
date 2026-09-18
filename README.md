@@ -1,5 +1,7 @@
 # TrajectoryRL
 
+> **Season 2 (transition): routing policies.** Miners submit a routing policy that picks Engy models per request; see [docs/ROUTING_POLICY.md](docs/ROUTING_POLICY.md). SN11's next stage is RSI infrastructure.
+
 > **Bittensor Subnet 11** — A reinforcement learning playground that continuously produces state-of-the-art skills for AI agents
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

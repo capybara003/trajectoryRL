@@ -12,6 +12,7 @@ thread) can mint tokens and read usage without touching the validator's main loo
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import secrets
@@ -48,6 +49,31 @@ class EpisodeUsage:
             "by_model": {m: round(v, 6) for m, v in sorted(self.by_model.items())},
             "tokens": dict(self.tokens), "cap_usd": self.cap_usd,
         }
+
+
+def norm_args(args: Any) -> str:
+    """Tool-call arguments as canonical JSON when they parse, else the raw string stripped."""
+    if isinstance(args, (dict, list)):
+        return json.dumps(args, sort_keys=True, separators=(",", ":"))
+    txt = (args or "") if isinstance(args, str) else str(args)
+    try:
+        return json.dumps(json.loads(txt), sort_keys=True, separators=(",", ":"))
+    except Exception:  # noqa: BLE001
+        return txt.strip()
+
+
+def content_fingerprint(content: str, tool_calls: list) -> dict:
+    """Hashes used by the provenance check: sha of the assistant text and sha of (name, canonical args) per tool call."""
+    text = (content or "").strip()
+    calls = [(tc.get("name") or (tc.get("function") or {}).get("name") or "",
+              norm_args(tc.get("arguments") if "arguments" in tc else (tc.get("function") or {}).get("arguments")))
+             for tc in (tool_calls or []) if isinstance(tc, dict)]
+    return {
+        "content_sha": hashlib.sha256(text.encode()).hexdigest()[:16] if text else None,
+        "content_len": len(text),
+        "tool_sha": hashlib.sha256(json.dumps(calls, sort_keys=True).encode()).hexdigest()[:16] if calls else None,
+        "tool_n": len(calls),
+    }
 
 
 def cost_of(model: str, usage: dict | None) -> tuple[float, int, int, int]:
@@ -96,7 +122,18 @@ class PolicyMeter:
 
         async def _serve():
             await runner.setup()
-            await web.TCPSite(runner, "0.0.0.0", self.port).start()
+            # Preferred port first; if another process holds it (a second
+            # validator on the same host, a stale lab meter) fall back to an
+            # ephemeral port. The sidecar learns the real port from the
+            # harness, so any port works.
+            try:
+                site = web.TCPSite(runner, "0.0.0.0", self.port)
+                await site.start()
+            except OSError as e:
+                logger.warning("policy meter port %d busy (%s); using an ephemeral port", self.port, e)
+                site = web.TCPSite(runner, "0.0.0.0", 0)
+                await site.start()
+            self.port = site._server.sockets[0].getsockname()[1]  # noqa: SLF001
 
         try:
             loop.run_until_complete(_serve())
@@ -158,7 +195,7 @@ class PolicyMeter:
         if stream:
             body.setdefault("stream_options", {})["include_usage"] = True
         hdr = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
-        t0 = time.time(); usage = None; finish = None; status = 0; err = None; retries = 0; ttfb = None
+        t0 = time.time(); usage = None; finish = None; status = 0; err = None; retries = 0; ttfb = None; fp = {}
         async with ClientSession(timeout=ClientTimeout(total=900)) as cs:
             while True:
                 async with cs.post(f"{self.up}/chat/completions", json=body, headers=hdr) as up:
@@ -173,7 +210,11 @@ class PolicyMeter:
                         data = await up.read(); ttfb = round(time.time() - t0, 3)
                         try:
                             d = json.loads(data); usage = d.get("usage")
-                            finish = (d.get("choices") or [{}])[0].get("finish_reason")
+                            ch0 = (d.get("choices") or [{}])[0]
+                            finish = ch0.get("finish_reason")
+                            msg = ch0.get("message") or {}
+                            fp = content_fingerprint(msg.get("content") if isinstance(msg.get("content"), str) else "",
+                                                     msg.get("tool_calls") or [])
                         except Exception:  # noqa: BLE001
                             pass
                         resp = web.Response(body=data, status=200, content_type="application/json")
@@ -193,6 +234,7 @@ class PolicyMeter:
                             async for c in up.content.iter_any():
                                 yield c
 
+                        text_parts: list[str] = []; tcs: dict[int, dict] = {}
                         async for chunk in _gen():
                             await resp.write(chunk); buf += chunk
                             while b"\n\n" in buf:
@@ -206,9 +248,20 @@ class PolicyMeter:
                                             for ch in j.get("choices") or []:
                                                 if ch.get("finish_reason"):
                                                     finish = ch["finish_reason"]
+                                                delta = ch.get("delta") or {}
+                                                if isinstance(delta.get("content"), str):
+                                                    text_parts.append(delta["content"])
+                                                for tc in delta.get("tool_calls") or []:
+                                                    slot = tcs.setdefault(int(tc.get("index", 0)), {"name": "", "arguments": ""})
+                                                    fn = tc.get("function") or {}
+                                                    if fn.get("name"):
+                                                        slot["name"] = fn["name"]
+                                                    if fn.get("arguments"):
+                                                        slot["arguments"] += fn["arguments"]
                                         except Exception:  # noqa: BLE001
                                             pass
                         await resp.write_eof()
+                        fp = content_fingerprint("".join(text_parts), [tcs[i] for i in sorted(tcs)])
                     break
         usd, pt, cached, ct = cost_of(model, usage) if status == 200 else (0.0, 0, 0, 0)
         if status == 200 and usage is None and err is None:
@@ -223,7 +276,7 @@ class PolicyMeter:
             resp.headers["x-trajrl-budget-remaining-usd"] = f"{max(0.0, ep.cap_usd - ep.spent_usd):.6f}"
         self._row(ep, dict(ts=round(t0, 3), model=model, status=status, stream=stream, prompt=pt, cached=cached,
                            completion=ct, finish=finish, err=err, retries=retries, ttfb=ttfb,
-                           s=round(time.time() - t0, 3), usd=round(usd, 8)))
+                           s=round(time.time() - t0, 3), usd=round(usd, 8), **fp))
         return resp
 
     def _row(self, ep: EpisodeUsage, row: dict) -> None:
