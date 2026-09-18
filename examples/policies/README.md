@@ -7,11 +7,11 @@ Each directory is the non-SKILL.md part of a pack. Build a pack with your SKILL.
     trajectoryrl-miner build SKILL.md --policy examples/policies/advisers -o pack.json
     python scripts/eval_pack.py --pack pack.json -o ./eval_output      # local run, your own Engy key
 
-| dir | what it does | measured on the 26 SPEC-24 scenarios (one trial each, 2026-09-18) |
+| dir | what it does | 26 SPEC-25 scenarios, one trial, real harness (2026-09-18) |
 |---|---|---|
-| pin | glm-5.3-flash for every call | 22.4 / 26 at $0.63 per session |
-| escalate | glm-5.3-flash, switch to kimi-k3 on stall / tool errors / repeats | not yet measured on this set |
-| advisers | kimi-k3 writes; three cheap models write notes before every turn | 23.2-23.4 / 26 at $5.3-6.3 |
-| sdk_custom | policy.py against the SDK: cheap first, strong + one adviser after turn 12 or a signal | not yet measured |
+| pin | glm-5.3-flash for every call | 22.60 / 26 at $0.56 per session |
+| escalate | glm-5.3-flash, switch to kimi-k3 on stall / tool errors / repeats | 20.99 / 26 at $4.68 |
+| advisers | kimi-k3 writes; three cheap models write notes before every turn | 23.55 / 26 at $10.02 |
+| sdk_custom | policy.py against the SDK: cheap first, strong + one adviser after turn 12 or a signal | 22.93 / 26 at $5.78 |
 
-Reference: pinned kimi-k3 scored 19.7-23.3 at $7.5-8.4 per session; pinned qwen3.8-27b (the Season 1 testee) 19.9-21.1.
+Reference: pinned kimi-k3 22.84 at $8.50; SKILL.md only (pin qwen3.8-27b, the Season 1 testee) 19.92 at $0.64.

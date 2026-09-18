@@ -188,20 +188,21 @@ starts. Set `TRAJRL_SKIP_ORPHAN_SCAN=1` for local runs that overlap (never on a 
 
 ---
 
-## Baselines (26 SPEC-24 scenarios, one trial each, 2026-09-18)
+## Baselines (26 SPEC-25 scenarios, one trial each, run through this exact harness on 2026-09-18)
 
-| policy | score /26 | $ per session |
-|---|---|---|
-| pin glm-5.3-flash | 22.4 | 0.63 |
-| pin kimi-k3 (three trials) | 19.7, 22.6, 23.3 | 7.5 to 8.4 |
-| pin qwen3.8-27b (Season 1 testee) | 19.9 to 21.1 | 0.63 to 0.77 |
-| pin glm-5.2 | 19.7 to 20.7 | 5.3 to 5.9 |
-| advisers: kimi-k3 + 3 cheap (two trials) | 23.2, 23.4 | 5.3 to 6.3 |
+| pack | policy | score /26 | $ per session | note |
+|---|---|---|---|---|
+| SKILL.md only | default pin on qwen3.8-27b (the Season 1 testee) | 19.92 | 0.64 | the Season 1 opening position |
+| `examples/policies/pin` | pin glm-5.3-flash | 22.60 | 0.56 | the cheap floor to beat |
+| pin kimi-k3 | pin kimi-k3 | 22.84 | 8.50 | strongest single model, 15x the price of the floor |
+| `examples/policies/escalate` | glm-5.3-flash, switch to kimi-k3 on signals | 20.99 | 4.68 | naive escalation loses: it escalates the wrong sessions |
+| `examples/policies/sdk_custom` | cheap, then kimi-k3 + one adviser after turn 12 or a signal | 22.93 | 5.78 | zero scenarios at 0 |
+| `examples/policies/advisers` | kimi-k3 writes, three cheap advisers | 23.55 | 10.02 | best measured; one trial |
 
-Trial-to-trial movement of a single policy is about one point on this set. Validators run one trial each and
-consensus averages them.
-
----
+Trial-to-trial movement of a single policy is about one point on this set (pinned kimi-k3 ranged 19.7 to 23.3
+over four lab trials). Validators run one trial each and consensus averages them. Every run above was made
+with `scripts/eval_pack.py --pack ...` on the same code the validators ship, so a miner reproducing them at home
+should land within noise.
 
 ## Anti-gaming
 
