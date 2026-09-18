@@ -163,6 +163,11 @@ with `aiohttp` and `httpx` is available; nothing can be installed at run time (n
 - Adviser fan-out adds 10 to 17 s per turn with three long-context calls in parallel. The 600 s deadline is
   per scenario, so latency is quality.
 - The sidecar has 1 CPU and 1 GB. It is started fresh for every scenario; there is no state across scenarios.
+- Watchdog: if no model call has completed through the meter within 120 s of the agent starting, or none in
+  the last 600 s, the validator kills the agent for that scenario and verifies whatever was written. A policy
+  that hangs, crashes, or refuses every call therefore costs at most two minutes per scenario, not the whole
+  budget. A policy that crashes before answering its health check fails the scenario immediately, with the
+  traceback in the episode's artifacts.
 
 ---
 

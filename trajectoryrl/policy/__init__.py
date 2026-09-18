@@ -31,7 +31,7 @@ SIDECAR_HEALTH_TIMEOUT_S = 60.0
 # this long after chat start, or if none completed in the last POLICY_IDLE_S
 # (the agent's long tool commands must stay under this).
 POLICY_FIRST_CALL_S = 120.0
-POLICY_IDLE_S = 420.0
+POLICY_IDLE_S = 600.0
 
 # Safety cap per episode in USD at the frozen price table. Not a scoring term (Ning 2026-09-18: cost is
 # reported, not scored, at launch); it bounds validator spend against runaway policies. 26 scenarios x $1 =
