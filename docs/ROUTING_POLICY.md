@@ -183,6 +183,9 @@ trajectoryrl-miner web-submit pack.json
 Local runs use your own Engy key through the same meter, so what you see is what the validators see, at your
 cost.
 
+Two local runs on one machine: the harness removes every trajectoryrl container on the host when a session
+starts. Set `TRAJRL_SKIP_ORPHAN_SCAN=1` for local runs that overlap (never on a validator).
+
 ---
 
 ## Baselines (26 SPEC-24 scenarios, one trial each, 2026-09-18)

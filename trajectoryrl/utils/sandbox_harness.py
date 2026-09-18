@@ -1198,6 +1198,12 @@ class TrajectorySandboxHarness:
         behind by prior eval cycles that didn't reach their finally
         block — typically because the validator was SIGKILL'd mid-cycle.
         """
+        if os.environ.get("TRAJRL_SKIP_ORPHAN_SCAN") == "1":
+            # Lab / miner-side escape hatch: the scan removes EVERY trajectoryrl
+            # container on the host, so two eval_pack runs (or a run next to a
+            # validator) on one machine kill each other. Never set on a validator.
+            logger.warning("TRAJRL_SKIP_ORPHAN_SCAN=1: skipping orphan container/network cleanup")
+            return
         for role in ("verifier", "sandbox", "policy-sidecar"):
             try:
                 orphans = self.client.containers.list(
