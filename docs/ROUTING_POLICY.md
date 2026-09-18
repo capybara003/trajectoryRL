@@ -231,4 +231,8 @@ scenario-name dispatch, no verifier internals, no obfuscated code. In addition:
   Hermes itself repaired one malformed tool-call JSON or normalised one message (coverage 0.91 and 0.93). The
   review threshold is coverage below 0.8, not below 1.0.
 - Off-allowlist models are impossible by construction (network isolation + allowlist).
+- The sidecar shares the episode network with the scenario container, so it can reach any port a scenario
+  happens to open (a scenario's own nginx, for example). It cannot read the filesystem, run commands there, or
+  see the verifier, which runs afterwards in a fresh container; treat anything learned that way as covered by
+  the same hardcoding rules.
 - The safety cap ends an episode's model calls at $1.00; whatever the agent had written is verified.
