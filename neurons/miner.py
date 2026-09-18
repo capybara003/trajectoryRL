@@ -77,7 +77,15 @@ def cmd_build(args):
         print(f"Error: {skill_path} is empty")
         return 1
 
-    pack = TrajectoryMiner.build_s1_pack(skill_content)
+    policy_files = None
+    if getattr(args, "policy", None):
+        try:
+            policy_files = TrajectoryMiner.read_policy_dir(args.policy)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error: {e}")
+            return 1
+        print(f"Policy files: {sorted(policy_files)}")
+    pack = TrajectoryMiner.build_s1_pack(skill_content, policy_files)
     pack_hash = TrajectoryMiner.save_pack(pack, args.output)
     size = len(json.dumps(pack, sort_keys=True))
 
@@ -350,6 +358,8 @@ Examples:
     p_build = sub.add_parser("build", help="Build pack.json from SKILL.md")
     p_build.add_argument("skill_md", help="Path to SKILL.md file")
     p_build.add_argument("--output", "-o", default="pack.json", help="Output path")
+    p_build.add_argument("--policy", default=None,
+                         help="Directory with the routing policy (policy.py or policy.json + helpers); Season 2")
 
     # validate
     p_validate = sub.add_parser("validate", help="Validate pack.json locally")

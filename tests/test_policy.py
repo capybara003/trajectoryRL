@@ -1,0 +1,192 @@
+"""Season 2 routing policies: pack extraction, the metering proxy, and the sidecar runtime helpers."""
+from __future__ import annotations
+
+import asyncio
+import json
+import socket
+import sys
+import threading
+import time
+from unittest.mock import MagicMock
+
+import pytest
+from aiohttp import ClientSession, web
+
+# Mock bittensor so importing trajectoryrl.* doesn't pull in the SDK.
+sys.modules.setdefault("bittensor", MagicMock())
+
+from trajectoryrl.policy import (  # noqa: E402
+    MODEL_ALLOWLIST, POLICY_FILES_MAX_BYTES, RUNTIME_FILE, extract_policy_files,
+)
+from trajectoryrl.policy.meter import PolicyMeter, cost_of  # noqa: E402
+
+
+def _free_port() -> int:
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
+
+
+# ---------------------------------------------------------------- pack extraction
+
+def test_extract_policy_files_skill_only_is_default_policy():
+    assert extract_policy_files({"schema_version": 1, "files": {"SKILL.md": "# hi"}}) == {}
+
+
+def test_extract_policy_files_keeps_everything_but_skill():
+    files = {"SKILL.md": "# hi", "policy.py": "print(1)", "prompts/a.txt": "x", "n": 3}
+    out = extract_policy_files({"schema_version": 1, "files": files})
+    assert out == {"policy.py": "print(1)", "prompts/a.txt": "x"}
+
+
+def test_extract_policy_files_rejects_traversal_and_size():
+    with pytest.raises(ValueError):
+        extract_policy_files({"files": {"SKILL.md": "x", "../evil.py": "y"}})
+    with pytest.raises(ValueError):
+        extract_policy_files({"files": {"SKILL.md": "x", "big.txt": "a" * (POLICY_FILES_MAX_BYTES + 1)}})
+
+
+def test_runtime_file_ships():
+    src = RUNTIME_FILE.read_text()
+    assert "def serve(" in src and "class AdvisersPolicy" in src
+
+
+# ---------------------------------------------------------------- cost table
+
+def test_cost_of_uses_cached_price():
+    usd, pt, cached, ct = cost_of("kimi-k3", {"prompt_tokens": 1000, "completion_tokens": 10,
+                                              "prompt_tokens_details": {"cached_tokens": 900}})
+    assert pt == 1000 and cached == 900 and ct == 10
+    assert usd == pytest.approx(100 * 1.95e-6 + 900 * 0.195e-6 + 10 * 9.75e-6)
+
+
+# ---------------------------------------------------------------- meter against a fake upstream
+
+class _FakeUpstream:
+    """Minimal OpenAI-compatible upstream: echoes usage, optionally streams."""
+
+    def __init__(self):
+        self.port = _free_port(); self.calls = 0; self.thread = None
+
+    async def chat(self, req):
+        self.calls += 1
+        body = await req.json()
+        usage = {"prompt_tokens": 100, "completion_tokens": 50, "prompt_tokens_details": {"cached_tokens": 40}}
+        if body.get("stream"):
+            resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"}); await resp.prepare(req)
+            await resp.write(b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n')
+            await resp.write(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":' + json.dumps(usage).encode() + b'}\n\n')
+            await resp.write(b"data: [DONE]\n\n"); await resp.write_eof(); return resp
+        return web.json_response({"choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}], "usage": usage})
+
+    def start(self):
+        ready = threading.Event()
+
+        def run():
+            loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+            app = web.Application(); app.router.add_post("/v1/chat/completions", self.chat)
+            runner = web.AppRunner(app)
+            loop.run_until_complete(runner.setup())
+            loop.run_until_complete(web.TCPSite(runner, "127.0.0.1", self.port).start())
+            ready.set(); loop.run_forever()
+
+        self.thread = threading.Thread(target=run, daemon=True); self.thread.start(); ready.wait(5)
+
+
+@pytest.fixture(scope="module")
+def meter():
+    up = _FakeUpstream(); up.start()
+    m = PolicyMeter(f"http://127.0.0.1:{up.port}/v1", "operator-key", port=_free_port())
+    m.start()
+    return m, up
+
+
+async def _post(meter, token, body):
+    async with ClientSession() as cs:
+        async with cs.post(f"http://127.0.0.1:{meter.port}/v1/chat/completions", json=body,
+                           headers={"Authorization": f"Bearer {token}"}) as r:
+            return r.status, await r.read(), dict(r.headers)
+
+
+@pytest.mark.asyncio
+async def test_meter_rejects_unknown_token(meter):
+    m, _ = meter
+    status, body, _ = await _post(m, "nope", {"model": "kimi-k3", "messages": []})
+    assert status == 401
+
+
+@pytest.mark.asyncio
+async def test_meter_allowlist_and_cost_and_cap(meter):
+    m, up = meter
+    tok = m.mint("t/scenario", cap_usd=0.001)
+    status, body, _ = await _post(m, tok, {"model": "gpt-5.4", "messages": []})
+    assert status == 400 and b"allowlist" in body
+    # non-stream call: cost recorded from usage
+    status, body, hdr = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}]})
+    assert status == 200 and json.loads(body)["choices"][0]["message"]["content"] == "hi"
+    u = m.usage(tok)
+    expected = 60 * 1.95e-6 + 40 * 0.195e-6 + 50 * 9.75e-6
+    assert u.spent_usd == pytest.approx(expected) and u.calls == 1 and u.by_model == {"kimi-k3": pytest.approx(expected)}
+    assert float(hdr["x-trajrl-budget-remaining-usd"]) == pytest.approx(0.001 - expected, abs=1e-6)
+    # stream call: usage parsed off the SSE tail
+    status, body, hdr = await _post(m, tok, {"model": "glm-5.3-flash", "messages": [], "stream": True})
+    assert status == 200 and b"data: [DONE]" in body
+    u = m.usage(tok); assert u.calls == 2 and "glm-5.3-flash" in u.by_model and u.tokens["completion"] == 100
+    # cap: force it and expect 402 with no upstream call
+    u.spent_usd = 1.0; calls_before = up.calls
+    status, body, hdr = await _post(m, tok, {"model": "kimi-k3", "messages": []})
+    assert status == 402 and up.calls == calls_before and m.usage(tok).refused_cap == 1
+    # close: token retired, summary complete
+    summary = m.close(tok).summary()
+    assert summary["calls"] == 2 and summary["refused_cap"] == 1 and summary["refused_model"] == 1
+    status, _, _ = await _post(m, tok, {"model": "kimi-k3", "messages": []})
+    assert status == 401
+
+
+# ---------------------------------------------------------------- runtime helpers (imported as a module)
+
+@pytest.fixture(scope="module")
+def rt():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("trajrl_policy", RUNTIME_FILE)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
+def test_session_key_uses_first_five_messages(rt):
+    base = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}, {"role": "assistant", "content": "A"},
+            {"role": "tool", "content": "skill"}, {"role": "tool", "content": "instruction-1"}]
+    other = base[:4] + [{"role": "tool", "content": "instruction-2"}]
+    assert rt.session_key(base) == rt.session_key(base + [{"role": "assistant", "content": "later"}])
+    assert rt.session_key(base) != rt.session_key(other)
+    assert rt.session_key(base[:2]).startswith("pre")
+
+
+def test_transcript_signals(rt):
+    sess = {"t0": time.time() - 1000, "last_finish": "length"}
+    msgs = [{"role": "tool", "content": "Traceback (most recent call last): boom"}] * 3
+    fired = rt.transcript_signals(msgs, sess)
+    assert {"stall", "len", "toolerr"} <= set(fired)
+    assert "noprog" not in rt.transcript_signals([{"role": "assistant", "content": "cat > /app/run.py"}] * 8, {"t0": time.time()})
+
+
+def test_rendered_sse_roundtrip(rt):
+    msg = {"content": "hello", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]}
+    out = rt.Rendered(msg, "auto", "tool_calls", {"prompt_tokens": 1}, True, "req1").sse().decode()
+    events = [json.loads(l[6:]) for l in out.splitlines() if l.startswith("data: ") and l != "data: [DONE]"]
+    assert events[0]["choices"][0]["delta"]["content"] == "hello"
+    assert events[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "terminal"
+    assert events[-1]["choices"][0]["finish_reason"] == "tool_calls" and out.endswith("data: [DONE]\n\n")
+
+
+def test_policy_from_config(rt):
+    assert rt.policy_from_config({"kind": "pin", "model": "glm-5.3-flash"}).name == "pin:glm-5.3-flash"
+    p = rt.policy_from_config({"kind": "escalate", "cheap": "a", "strong": "b", "signals": ["stall"]})
+    assert p.signals == {"stall"}
+    p = rt.policy_from_config({"kind": "advisers", "writer": "kimi-k3", "advisers": ["x", "y"]})
+    assert p.writer == "kimi-k3" and p.advisers == ["x", "y"]
+    with pytest.raises(ValueError):
+        rt.policy_from_config({"kind": "nope"})
+
+
+def test_allowlist_is_the_prod_catalog():
+    assert set(MODEL_ALLOWLIST) == {"deepseek-v4-flash-0731", "deepseek-v4.1-flash", "glm-5.2", "glm-5.3",
+                                    "glm-5.3-flash", "kimi-k3", "qwen3.6-35b-a3b", "qwen3.8-27b"}

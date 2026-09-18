@@ -27,6 +27,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Sequence
 
+from ..policy import extract_policy_files
 from .commitments import MinerCommitment
 from .github import PackFetcher
 from .sandbox_harness import (
@@ -162,9 +163,19 @@ async def evaluate_miner_s1(
             skip_reason=SKIP_MISSING_SKILL_MD,
         )
 
-    extra_files = [f for f in files if f != "SKILL.md"]
-    if extra_files:
-        log.warning("S1 pack contains unexpected files: %s", extra_files)
+    # Season 2: every file other than SKILL.md is part of the routing policy
+    # (policy.py / policy.json + helpers) and goes to the policy sidecar. A
+    # SKILL.md-only pack runs the default pin policy on the locked testee.
+    try:
+        policy_files = extract_policy_files(pack)
+    except ValueError as e:
+        log.warning("Invalid policy files: %s", e)
+        return MinerEvalOutcome(
+            success=False,
+            skip_reason=SKIP_INVALID_PACK,
+            skip_detail=str(e),
+        )
+    log.info("Policy files: %s", sorted(policy_files) or "<none: default pin policy>")
 
     skill_md = files.get("SKILL.md")
     if not isinstance(skill_md, str) or not skill_md.strip():
@@ -194,6 +205,7 @@ async def evaluate_miner_s1(
             on_episode_done=on_episode_done,
             is_epoch_still_current=is_epoch_still_current,
             scenarios=scenarios,
+            policy_files=policy_files,
         )
     except Exception as e:
         log.error("S1 evaluation failed: %s", e, exc_info=True)

@@ -114,21 +114,40 @@ class TrajectoryMiner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def build_s1_pack(skill_md: str) -> dict:
-        """Build a Season 1 pack from SKILL.md content.
+    def build_s1_pack(skill_md: str, policy_files: Optional[Dict[str, str]] = None) -> dict:
+        """Build a pack from SKILL.md content plus (Season 2) the routing
+        policy files: ``policy.py`` or ``policy.json`` and any helper text
+        files, keyed by their path inside the policy directory.
 
         Args:
             skill_md: SKILL.md content string.
+            policy_files: {relative path: content}; omitted for a
+                SKILL.md-only pack (evaluated with the default pin policy).
 
         Returns:
-            Pack dict: {"schema_version": 1, "files": {"SKILL.md": content}}
+            Pack dict: {"schema_version": 1, "files": {"SKILL.md": ..., ...}}
         """
-        return {
-            "schema_version": 1,
-            "files": {
-                "SKILL.md": skill_md,
-            },
-        }
+        files = {"SKILL.md": skill_md}
+        for name, content in sorted((policy_files or {}).items()):
+            if name == "SKILL.md":
+                raise ValueError("policy directory must not contain SKILL.md")
+            files[name] = content
+        return {"schema_version": 1, "files": files}
+
+    @staticmethod
+    def read_policy_dir(path: str) -> Dict[str, str]:
+        """Read every regular text file under ``path`` (recursively) into
+        {relative posix path: content} for ``build_s1_pack``."""
+        root = Path(path)
+        if not root.is_dir():
+            raise FileNotFoundError(f"policy directory not found: {path}")
+        out: Dict[str, str] = {}
+        for f in sorted(root.rglob("*")):
+            if f.is_file() and "__pycache__" not in f.parts:
+                out[f.relative_to(root).as_posix()] = f.read_text(encoding="utf-8")
+        if "policy.py" not in out and "policy.json" not in out:
+            raise ValueError("policy directory needs policy.py or policy.json")
+        return out
 
     @staticmethod
     def validate_s1(pack: dict) -> List[str]:

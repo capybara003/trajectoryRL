@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+import socket
 import hashlib
 import io
 import json
@@ -48,6 +50,11 @@ from docker.models.containers import Container
 from docker.types import LogConfig
 
 from ..utils.config import SPEC_NUMBER, ValidatorConfig
+from ..policy import (
+    EPISODE_CAP_USD, METER_ALIAS, METER_PORT, POLICY_ALIAS, POLICY_PORT,
+    RUNTIME_FILE, SIDECAR_CPU_QUOTA, SIDECAR_HEALTH_TIMEOUT_S, SIDECAR_MEM_LIMIT,
+)
+from ..policy.meter import PolicyMeter
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +210,11 @@ SCENARIOS_BY_SPEC: Dict[int, tuple[str, ...]] = {
 
 # Default scenario set: the local binary's spec. A SPEC_NUMBER bump
 # without a matching registry entry fails loudly at import time.
+# SPEC 25 (Season 2, routing policies): the scenario set is SPEC 24's, unchanged.
+# The bump marks the testee change: the miner's routing policy over the Engy
+# allowlist replaces the pinned qwen3.8-27b, so scores are not comparable.
+SCENARIOS_BY_SPEC[25] = SCENARIOS_BY_SPEC[24]
+
 SANDBOX_SCENARIOS: tuple[str, ...] = SCENARIOS_BY_SPEC[SPEC_NUMBER]
 
 
@@ -572,6 +584,15 @@ class _EpisodeResult:
     # does NOT factor into the score (separate axis — see Ning's
     # 2026-05-04 design call).
     cost_usd: float | None = None
+    # Season 2: cost_usd above is the METER total for the episode (every
+    # model call the policy made, at the frozen price table). Hermes' own
+    # figure is kept for comparison; by-model breakdown + meter summary
+    # (calls, tokens, refusals, per-call rows) go to artifacts/payload.
+    hermes_cost_usd: float | None = None
+    cost_by_model: dict = field(default_factory=dict)
+    meter: dict = field(default_factory=dict)
+    policy_log: str = ""
+    policy_setup_s: float | None = None
     transcript: str = ""
     turns_log: str = ""
     turns_export_err: str = ""
@@ -747,6 +768,11 @@ class SandboxEvaluationResult:
                 json.dumps(ep.ep_data, indent=2, default=str))
             if ep.error:
                 (ep_dir / "error.txt").write_text(ep.error)
+            if ep.policy_log:
+                (ep_dir / "policy.log").write_text(ep.policy_log)
+            if ep.meter:
+                (ep_dir / "meter.json").write_text(
+                    json.dumps(ep.meter, indent=2, default=str))
 
 
 # ---------------------------------------------------------------------------
@@ -1104,6 +1130,12 @@ class TrajectorySandboxHarness:
         self.harness_name: Optional[str] = None
         self.harness_version: Optional[str] = None
 
+        # Season 2 routing policies: metering proxy (started lazily, one per
+        # process) and the validator's own container handle when we run
+        # inside docker (the meter is then reached over a network alias).
+        self._meter: Optional[PolicyMeter] = None
+        self._self_container: Optional[Container] = None
+        self._self_container_checked = False
         self.bench_image_hash: str = "unknown"
         self.scenario_image_hash: str = "unknown"
         self.scenario_image_hashes: Dict[str, str] = {}
@@ -1127,7 +1159,7 @@ class TrajectorySandboxHarness:
         behind by prior eval cycles that didn't reach their finally
         block — typically because the validator was SIGKILL'd mid-cycle.
         """
-        for role in ("verifier", "sandbox"):
+        for role in ("verifier", "sandbox", "policy-sidecar"):
             try:
                 orphans = self.client.containers.list(
                     all=True,
@@ -1146,8 +1178,9 @@ class TrajectorySandboxHarness:
                         role, c.name, e,
                     )
         try:
-            for net in self.client.networks.list(
-                filters={"label": "trajectoryrl.role=eval_net"},
+            for net in (
+                self.client.networks.list(filters={"label": "trajectoryrl.role=eval_net"})
+                + self.client.networks.list(filters={"label": "trajectoryrl.role=policy-net"})
             ):
                 try:
                     net.remove()
@@ -1332,6 +1365,7 @@ class TrajectorySandboxHarness:
         on_episode_done: Optional[Callable[[_EpisodeResult, int, int], None]] = None,
         is_epoch_still_current: Optional[Callable[[str], bool]] = None,
         scenarios: Optional[Sequence[str]] = None,
+        policy_files: Optional[Dict[str, str]] = None,
     ) -> SandboxEvaluationResult:
         """Run the multi-scenario session.
 
@@ -1385,6 +1419,7 @@ class TrajectorySandboxHarness:
                     on_episode_done=on_episode_done,
                     is_epoch_still_current=is_epoch_still_current,
                     scenarios=eval_scenarios,
+                    policy_files=policy_files,
                 ),
             )
         except Exception as e:
@@ -1408,6 +1443,7 @@ class TrajectorySandboxHarness:
         on_episode_done: Optional[Callable[[_EpisodeResult, int, int], None]] = None,
         is_epoch_still_current: Optional[Callable[[str], bool]] = None,
         scenarios: Optional[Sequence[str]] = None,
+        policy_files: Optional[Dict[str, str]] = None,
     ) -> _SessionResult:
         """One container per scenario, one episode each.
 
@@ -1604,6 +1640,7 @@ class TrajectorySandboxHarness:
                         episode_index=cell_index,
                         skill_md=skill_md,
                         spec=spec,
+                        policy_files=policy_files,
                         on_chat_start=(
                             (lambda sc=spec["name"], idx=cell_index, tot=total:
                                 on_episode_start(sc, idx, tot))
@@ -1740,6 +1777,7 @@ class TrajectorySandboxHarness:
         on_chat_end: Optional[Callable[[], None]] = None,
         on_container_started: Optional[Callable[[Container], None]] = None,
         on_container_finished: Optional[Callable[[], None]] = None,
+        policy_files: Optional[Dict[str, str]] = None,
     ) -> _EpisodeResult:
         """Run one cell: spin up the scenario container, exec hermes,
         extract output, run verifier, tear down.
@@ -1778,6 +1816,14 @@ class TrajectorySandboxHarness:
         logger.info("[%s] %s starting (image=%s)", session_id, scenario, scenario_image)
 
         sandbox = None
+        # Season 2: every episode gets its own meter token, an internal
+        # network and a policy sidecar; Hermes talks to the sidecar as if
+        # it were the LLM (LLM_BASE_URL -> http://policy:8800/v1, model
+        # 'auto'); the sidecar can only reach the meter.
+        meter = self._ensure_meter()
+        ep_token = meter.mint(f"{session_id}/{scenario}", EPISODE_CAP_USD)
+        pnet = None
+        sidecar = None
         try:
             sandbox = self.client.containers.run(
                 scenario_image,
@@ -1787,9 +1833,9 @@ class TrajectorySandboxHarness:
                 # (LLM API) and the verifier (apt + uv installs).
                 network="bridge",
                 environment={
-                    "LLM_API_KEY":  self._testee_api_key,
-                    "LLM_BASE_URL": self._testee_api_url,
-                    "LLM_MODEL":    self._testee_model,
+                    "LLM_API_KEY":  ep_token,
+                    "LLM_BASE_URL": f"http://{POLICY_ALIAS}:{POLICY_PORT}/v1",
+                    "LLM_MODEL":    "auto",
                 },
                 mem_limit="4g", cpu_quota=200000,
                 labels={"trajectoryrl.role": "sandbox",
@@ -1849,6 +1895,10 @@ class TrajectorySandboxHarness:
                 "mkdir -p /opt/data && chown -R hermes:hermes /opt/data",
             ])
 
+            pnet, sidecar, episode.policy_setup_s = self._start_policy_sidecar(
+                session_id, scenario, sandbox, ep_token, policy_files or {},
+            )
+
             harness_prompt = (
                 "Read /workspace/SKILL.md for your approach. "
                 "Read /workspace/INSTRUCTION.md for the task. "
@@ -1863,7 +1913,7 @@ class TrajectorySandboxHarness:
             agent_cmd = (
                 "set +e; "
                 f"hermes chat -q {_shell_quote(harness_prompt)} "
-                f"-m {_shell_quote(self._testee_model)} "
+                "-m auto "
                 "-t terminal,file,code_execution,memory "
                 "--quiet --yolo; "
                 "chat_rc=$?; "
@@ -1895,9 +1945,9 @@ class TrajectorySandboxHarness:
                 workdir="/workspace",
                 stdout=True, stderr=False,
                 environment={
-                    "OPENROUTER_API_KEY": self._testee_api_key,
-                    "OPENAI_API_KEY":     self._testee_api_key,
-                    "ANTHROPIC_API_KEY":  self._testee_api_key,
+                    "OPENROUTER_API_KEY": ep_token,
+                    "OPENAI_API_KEY":     ep_token,
+                    "ANTHROPIC_API_KEY":  ep_token,
                     "HERMES_BUNDLED_SKILLS": "/nonexistent",
                     "HOME": "/opt/data",
                 },
@@ -1976,7 +2026,14 @@ class TrajectorySandboxHarness:
             # Cost axis: pulled from the agent's Hermes session export
             # (turns.jsonl). Reported alongside quality, NOT folded
             # into the score — separate axis on the leaderboard.
-            episode.cost_usd = _parse_session_cost(episode.turns_log)
+            episode.hermes_cost_usd = _parse_session_cost(episode.turns_log)
+            usage = meter.close(ep_token)
+            if usage is not None:
+                episode.cost_usd = usage.spent_usd
+                episode.cost_by_model = dict(usage.by_model)
+                episode.meter = usage.summary()
+                episode.meter["rows"] = usage.rows
+            episode.policy_log = self._policy_log_tail(sidecar)
 
             episode.judge_result = {
                 "reward": reward,
@@ -1984,6 +2041,10 @@ class TrajectorySandboxHarness:
                 "total": total,
                 "correctness": episode.quality,
                 "cost_usd": episode.cost_usd,
+                "hermes_cost_usd": episode.hermes_cost_usd,
+                "cost_by_model": episode.cost_by_model,
+                "meter": {k: v for k, v in episode.meter.items() if k != "rows"},
+                "policy_setup_s": episode.policy_setup_s,
                 "verifier_stdout": verifier_result.get("stdout", ""),
                 "ctrf": ctrf,
             }
@@ -2003,6 +2064,8 @@ class TrajectorySandboxHarness:
                 session_id, scenario, e, exc_info=True,
             )
         finally:
+            meter.close(ep_token)
+            self._stop_policy_sidecar(session_id, scenario, sidecar, pnet, sandbox)
             if sandbox:
                 try:
                     sandbox.stop(timeout=5)
@@ -2020,6 +2083,172 @@ class TrajectorySandboxHarness:
 
         episode.duration_s = time.time() - t0
         return episode
+
+
+    # ------------------------------------------------------------------
+    # Season 2: policy sidecar + meter
+    # ------------------------------------------------------------------
+
+    def _ensure_meter(self) -> PolicyMeter:
+        """Start the metering proxy once per process (thread-safe enough:
+        first episode of the first session starts it before the pool
+        fans out; later calls return the same instance)."""
+        if self._meter is None:
+            meter = PolicyMeter(self._testee_api_url, self._testee_api_key, port=METER_PORT)
+            meter.start()
+            self._meter = meter
+        return self._meter
+
+    def _own_container(self) -> Optional[Container]:
+        """The validator's own container when running inside docker (the
+        compose deployment), else None (host process, e.g. eval_pack.py).
+        Under compose the hostname is the container id."""
+        if self._self_container_checked:
+            return self._self_container
+        self._self_container_checked = True
+        if not os.path.exists("/.dockerenv"):
+            return None
+        try:
+            self._self_container = self.client.containers.get(socket.gethostname())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("running in docker but cannot resolve own container: %s", e)
+            self._self_container = None
+        return self._self_container
+
+    def _start_policy_sidecar(
+        self, session_id: str, scenario: str, sandbox: Container, token: str,
+        policy_files: Dict[str, str],
+    ) -> tuple:
+        """Create the episode's internal network, start the policy sidecar
+        on it with the miner's files + the runtime, attach the scenario
+        container, and wait for the policy to answer /v1/models.
+
+        Returns (network, sidecar, setup_seconds). Raises on failure (a
+        policy that never comes up is the miner's failure and scores the
+        episode 0 with the reason in error.txt; an unreachable meter is
+        ours and shows up the same way in the log)."""
+        t0 = time.time()
+        safe = scenario.replace("/", "_")
+        net = self.client.networks.create(
+            f"pnet_{session_id}_{safe}", driver="bridge", internal=True,
+            labels={"trajectoryrl.role": "policy-net",
+                    "trajectoryrl.session": session_id,
+                    "trajectoryrl.scenario": scenario},
+        )
+        own = self._own_container()
+        if own is not None:
+            net.connect(own, aliases=[METER_ALIAS])
+            upstream = f"http://{METER_ALIAS}:{METER_PORT}/v1"
+        else:
+            gw = net.attrs["IPAM"]["Config"][0]["Gateway"]
+            upstream = f"http://{gw}:{METER_PORT}/v1"
+
+        runtime_src = RUNTIME_FILE.read_bytes()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            def _add(name: str, data: bytes) -> None:
+                info = tarfile.TarInfo(name=name)
+                info.size = len(data); info.mode = 0o644; info.mtime = int(time.time())
+                tar.addfile(info, io.BytesIO(data))
+            _add("policy/sdk/trajrl_policy.py", runtime_src)
+            for name, content in policy_files.items():
+                _add(f"policy/{name}", content.encode("utf-8"))
+        buf.seek(0)
+
+        sidecar = self.client.containers.create(
+            self._sandbox_image,
+            name=f"policy_{session_id}_{safe}",
+            entrypoint=["bash", "-c",
+                        "chown -R hermes:hermes /policy && cd /policy && "
+                        "exec gosu hermes /opt/hermes/.venv/bin/python /policy/sdk/trajrl_policy.py"],
+            user="root",
+            environment={
+                "POLICY_PORT": str(POLICY_PORT),
+                "UPSTREAM_URL": upstream,
+                "EPISODE_TOKEN": token,
+                "POLICY_DIR": "/policy",
+                "POLICY_LOG": "/policy/policy.log",
+                "DEFAULT_MODEL": self._testee_model,
+                "PYTHONPATH": "/policy/sdk:/policy",
+                "PYTHONUNBUFFERED": "1",
+                "HOME": "/opt/data",
+            },
+            network=net.name,
+            mem_limit=SIDECAR_MEM_LIMIT, cpu_quota=SIDECAR_CPU_QUOTA,
+            labels={"trajectoryrl.role": "policy-sidecar",
+                    "trajectoryrl.session": session_id,
+                    "trajectoryrl.scenario": scenario},
+            log_config=LogConfig(type=LogConfig.types.JSON,
+                                 config={"max-size": "20m"}),
+        )
+        sidecar.put_archive("/", buf)
+        sidecar.start()
+        # docker-py 7.x cannot set an alias at create time: reconnect with it.
+        net.disconnect(sidecar)
+        net.connect(sidecar, aliases=[POLICY_ALIAS])
+        net.connect(sandbox)
+
+        deadline = time.time() + SIDECAR_HEALTH_TIMEOUT_S
+        url = f"http://{POLICY_ALIAS}:{POLICY_PORT}/v1/models"
+        while True:
+            rc, out = sandbox.exec_run(["curl", "-s", "-m", "2", url])
+            if rc == 0 and b"data" in out:
+                break
+            if time.time() > deadline:
+                tail = self._policy_log_tail(sidecar)[-1500:]
+                raise RuntimeError(
+                    f"policy sidecar did not answer {url} within "
+                    f"{SIDECAR_HEALTH_TIMEOUT_S:.0f}s; policy log tail: {tail!r}"
+                )
+            time.sleep(0.5)
+        setup_s = round(time.time() - t0, 2)
+        logger.info("[%s] %s policy sidecar ready in %.1fs (files=%s, upstream=%s)",
+                    session_id, scenario, setup_s, sorted(policy_files) or ["<default pin>"], upstream)
+        return net, sidecar, setup_s
+
+    def _policy_log_tail(self, sidecar: Optional[Container], max_bytes: int = 64 * 1024) -> str:
+        """The policy's own log (JSONL written by the runtime) plus its
+        stdout/stderr tail, for artifacts and error messages."""
+        if sidecar is None:
+            return ""
+        parts: List[str] = []
+        try:
+            txt = _read_container_text(sidecar, "/policy/policy.log")
+            if txt:
+                parts.append(txt[-max_bytes:])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            out = sidecar.logs(tail=200)
+            if out:
+                parts.append("--- stdout/stderr ---\n" + out.decode("utf-8", "replace")[-max_bytes:])
+        except Exception:  # noqa: BLE001
+            pass
+        return "\n".join(parts)
+
+    def _stop_policy_sidecar(self, session_id: str, scenario: str, sidecar, net, sandbox) -> None:
+        """Best-effort teardown: sidecar, then detach everything, then the network."""
+        if sidecar is not None:
+            try:
+                sidecar.stop(timeout=3)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                sidecar.remove(force=True, v=True)
+            except Exception:  # noqa: BLE001
+                pass
+        if net is not None:
+            for c in (sandbox, self._own_container()):
+                if c is None:
+                    continue
+                try:
+                    net.disconnect(c, force=True)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                net.remove()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s] %s could not remove policy network: %s", session_id, scenario, e)
 
     # ------------------------------------------------------------------
     # Container helpers
