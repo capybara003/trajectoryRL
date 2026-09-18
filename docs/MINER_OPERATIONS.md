@@ -42,6 +42,9 @@ vim SKILL.md
 # 2. Build pack
 trajectoryrl-miner build SKILL.md -o pack.json
 
+# Season 2: add your routing policy directory (policy.py or policy.json + helper files)
+trajectoryrl-miner build SKILL.md --policy ./my_policy -o pack.json
+
 # 3. Pay the submission fee and submit.
 #    The CLI recycles SUBMISSION_FEE_ALPHA (default 50 α) on-chain via
 #    recycle_alpha, then POSTs the pack + recycle receipt to the platform.
