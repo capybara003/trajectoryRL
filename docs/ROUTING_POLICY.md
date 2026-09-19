@@ -10,15 +10,16 @@
 > current SKILL.md contest running, so Season 2 reuses the Season 1 harness, scenarios, verifier and
 > consensus unchanged and changes only the object of competition: the miner's **routing policy** over
 > the Engy model catalog. Expect Season 2 to be superseded when the RSI platform launches; the policies
-> written for it remain useful, because a good routing policy is exactly the per-request "auto" model
-> Engy will serve. The full sequence of seasons is in [ROADMAP.md](ROADMAP.md).
+> written for it remain useful, because a routing policy is exactly the per-request "auto" model Engy
+> serves: the policy that holds the seat becomes Engy's auto mode (`engy/auto`) for every customer and every
+> harness. The full sequence of seasons is in [ROADMAP.md](ROADMAP.md).
 
 **Scoring**: programmatic verifier, quality summed across the active scenario set (unchanged from Season 1)
 **Spec**: 25 (same 26 scenarios as SPEC 24; new testee: your routing policy)
 
 > Mining means writing a **routing policy**: a program that sits between the agent harness (Hermes) and the
 > Engy model catalog and decides, per request, which models to call and what to send them. The best policy
-> wins. The artifact you ship *is* a deployable per-request "auto" model.
+> wins, and it ships: the seated policy is served as Engy's auto mode.
 
 ---
 

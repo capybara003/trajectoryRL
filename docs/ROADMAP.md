@@ -18,7 +18,12 @@ The object of competition becomes the **routing policy**: a program shipped next
 the agent harness and the Engy model catalog and decides, per request, which open-weight models answer and what
 they are sent. The validator runs it in a sidecar next to the scenario container and meters every model call.
 Harness, scenarios, verifier and consensus are unchanged from Season 1. The score is still the scenario sum;
-cost is measured and shown on the leaderboard. A winning policy is a deployable per-request "auto" model.
+cost is measured and shown on the leaderboard.
+
+A routing policy has exactly the shape of a product: a per-request model that any harness can point at. The
+policy that holds the seat is served on Engy as its **auto mode** (`engy/auto`), the same models at the same
+prices, usable by every Engy customer as soon as it takes the seat. Miners are writing the routing layer of a
+live inference product, not only competing for emission.
 
 Why a transition: the rebuild below takes longer than we were willing to leave Season 1 running, and routing
 policies are the one piece of it that could ship on the existing harness today. Details:
