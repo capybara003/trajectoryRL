@@ -361,3 +361,14 @@ def test_drain_aborts_on_should_abort():
     chunks, timed_out = _drain_exec_stream_with_deadline(silent(), timeout=30, on_deadline=lambda: killed.append(1),
                                                         poll_interval_s=0.05, should_abort=lambda: time.time() - t0 > 0.3)
     assert timed_out and killed == [1] and time.time() - t0 < 5
+
+
+def test_scan_policy_files_flags_dispatch_and_blobs():
+    from trajectoryrl.policy import scan_policy_files
+    names = ("git-leak-recovery", "postgres-csv-clean", "puzzle-solver")
+    clean = {"policy.py": "req['model'] = 'glm-5.3-flash' if 'git' in txt else 'kimi-k3'"}
+    r = scan_policy_files(clean, names)
+    assert r["scenario_hits"] == 0 and r["b64_blobs"] == 0
+    bad = {"policy.py": "TABLE = {'git-leak-recovery': 'kimi-k3', 'puzzle-solver': 'glm-5.3'}\nPAYLOAD = '" + ("QUJD" * 60) + "'\nMSG = 'x' * 1"}
+    r = scan_policy_files(bad, names)
+    assert r["scenario_hits"] == 2 and set(r["scenario_names"]) == {"git-leak-recovery", "puzzle-solver"} and r["b64_blobs"] == 1 and r["long_literals"] >= 1
