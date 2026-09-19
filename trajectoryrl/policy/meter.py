@@ -108,9 +108,19 @@ def estimate_prompt_tokens(body: dict) -> int:
         text = json.dumps(billed, ensure_ascii=False, separators=(",", ":"))
     except Exception:  # noqa: BLE001
         return 16
-    non_ascii = sum(1 for ch in text if ord(ch) > 127)
-    ascii_chars = len(text) - non_ascii
-    return int((ascii_chars / CHARS_PER_TOKEN + non_ascii * NON_ASCII_TOKENS_PER_CHAR) * PROMPT_SAFETY) + 16
+    # Letters, digits and spaces tokenize at ~3+ chars/token; punctuation and
+    # symbols (and anything non-ASCII) are close to one token per character,
+    # which is also what an adversary would send to make the estimate low.
+    non_ascii = 0; dense = 0; plain = 0
+    for ch in text:
+        o = ord(ch)
+        if o > 127:
+            non_ascii += 1
+        elif ch.isalnum() or ch in " \n\t":
+            plain += 1
+        else:
+            dense += 1
+    return int((plain / CHARS_PER_TOKEN + (dense + non_ascii) * NON_ASCII_TOKENS_PER_CHAR) * PROMPT_SAFETY) + 16
 
 
 def reserve_for(model: str, body: dict, room_usd: float) -> tuple[float, int | None, bool]:

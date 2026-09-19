@@ -292,7 +292,8 @@ async def test_concurrent_calls_share_one_reservation_pool(meter):
     # at least one of the overlapping calls, and the reservation pool is empty again afterwards
     assert statuses.count(200) >= 2 and (u.clamped >= 1 or statuses.count(402) >= 1)
     assert u.spent_usd <= 1.7e-4 + 1e-9 and u.reserved_usd == pytest.approx(0.0)
-    assert max(r["max_tokens"] for r in u.rows if r.get("max_tokens")) == 1000 and min(r["max_tokens"] for r in u.rows if r.get("max_tokens")) < 1000
+    sent = [r["max_tokens"] for r in u.rows if r.get("max_tokens")]
+    assert max(sent) == 1000 and (min(sent) < 1000 or statuses.count(402) >= 1)   # third call clamped or refused
 
 
 def test_read_policy_dir_rejects_binary_and_skips_pyc(tmp_path):
@@ -324,15 +325,17 @@ def test_prompt_estimate_counts_tools_and_non_ascii():
     cjk = {**base, "messages": [{"role": "user", "content": "\u4e2d" * 300}]}
     assert estimate_prompt_tokens(cjk) >= 300 * 1.25                # one token per CJK character, with safety factor
     assert estimate_prompt_tokens({**base, "max_tokens": 100000}) == e0   # generation knobs are not billed input
+    dense = {**base, "messages": [{"role": "user", "content": "!@#$%^&*()" * 30}]}
+    assert estimate_prompt_tokens(dense) >= 300 * 1.25                # symbol-dense ASCII counts one token per character
 
 
 @pytest.mark.asyncio
 async def test_overshoot_is_booked_and_closes_the_cap(meter):
     m, up = meter
     # fake upstream bills 100 prompt tokens whatever we send; a 1-char prompt reserves far less -> overshoot recorded
-    # reservation for this call: ~34 prompt tokens + 50 completion on kimi ~ 5.5e-4 (cap 7e-4 leaves >= 64 tokens of room); the fake bills 100 prompt
+    # reservation for this call: ~50 prompt tokens + 50 completion on kimi ~ 5.9e-4 (cap 8e-4 leaves >= 64 tokens of room); the fake bills 100 prompt
     # tokens (60 uncached + 40 cached) + 50 completion ~ 6.1e-4 -> overshoot ~4e-5, and spent ends above the cap
-    tok = m.mint("t/over", cap_usd=0.0007)
+    tok = m.mint("t/over", cap_usd=0.0008)
     status, body, _ = await _post(m, tok, {"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}], "max_tokens": 50})
     assert status == 200
     for _ in range(100):
