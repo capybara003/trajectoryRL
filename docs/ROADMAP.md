@@ -29,6 +29,30 @@ Why a transition: the rebuild below takes longer than we were willing to leave S
 policies are the one piece of it that could ship on the existing harness today. Details:
 [ROUTING_POLICY.md](ROUTING_POLICY.md).
 
+## Why now
+
+Three results in 2026 share one recipe.
+
+- Z.ai, "Toward Recursive Self-Improvement: How GLM Built Its Own Inference Infrastructure" (17 September
+  2026): an Infra Agent powered by GLM-5.3 built the production serving stack for GLM-5.3-Flash on more than
+  100,000 domestic accelerators, first run to production in under two weeks, three times the baseline
+  throughput. Their definition of RSI is a system that designs and trains its own successor; they state they
+  are not there yet and call this an early form. Their lesson: the agent's effectiveness "depended not only on
+  the model's code generation and reasoning capabilities, but even more on whether the system could
+  continuously provide useful feedback that could be traced to specific causes." Feedback that is local,
+  cheap and objectively verifiable is the lever.
+- OpenAI's claimed resolution of the forced Navier-Stokes blow-up problem (8 September 2026): about ten
+  thousand agents for 88 hours, formalized in Lean. Still under community verification and disputed on
+  credit; the method is not in dispute: broad search by many agents with a formal verifier at the end.
+- DeepMind's AlphaProof Nexus on formalized Erdős problems: thousands of episodes per problem, a few hundred
+  dollars each, checked in Lean.
+
+The recipe: a ground-truth environment with dense, verifiable feedback; many agents searching in it; an
+automatic verifier. Verification has become cheap. What is scarce is who hosts the environment, who pays for
+the search, who checks the checker, and who owns what the search produces. Each lab does this inside its own
+walls. SN11's roadmap is the open version: the subnet pays for verified search, miners bring the agents, Engy
+serves the open-weight models, and the environments and verifiers are hosted and replayable by anyone.
+
 ## Where SN11 is going: verified agent work on environments we host
 
 The principles behind the next seasons:
@@ -73,9 +97,19 @@ verified attempts and verified progress, with a bonus for succeeding where the s
 
 Beyond emission: a corpus of verified agent trajectories with real tool results and outcomes; an adversarially
 grown benchmark nobody wrote by hand; improvements to the serving stack the platform runs on; and replayable
-evidence of progress on open problems. Each of these feeds the next models and agents that serve the miners.
-That loop is the point. We do not claim recursive self-improvement today; we are building the infrastructure
-in which it can be measured.
+evidence of progress on open problems. Each of these feeds the next models and agents that Engy serves to the
+miners, who use them to produce the next corpus. In Z.ai's terms this is an early form of the loop: a platform
+improving the models and the infrastructure that serve it, with humans holding the objectives, the boundaries
+and the risk review. We do not claim recursive self-improvement today. We are building the infrastructure in
+which it can be measured, and we will publish what it measures.
+
+## References
+
+- Z.ai, Toward Recursive Self-Improvement: How GLM Built Its Own Inference Infrastructure, 2026-09-17.
+  https://z.ai/blog/glm-built-its-inference-infrastructure
+- OpenAI, On the Navier-Stokes Millennium Prize Problem, 2026-09-08 (claim under verification).
+- Google DeepMind, AlphaProof Nexus (formalized Erdős problems in Lean), arXiv:2605.22763.
+- Verification abundance, adjudication scarcity, arXiv:2608.28997.
 
 ## What stays the same
 
