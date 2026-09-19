@@ -53,6 +53,35 @@ the search, who checks the checker, and who owns what the search produces. Each 
 walls. SN11's roadmap is the open version: the subnet pays for verified search, miners bring the agents, Engy
 serves the open-weight models, and the environments and verifiers are hosted and replayable by anyone.
 
+## The protocol
+
+The hard part of what follows is not agents or models. It is the protocol that turns a problem into an
+environment whose state can be versioned and whose success can be computed, and a platform that hosts
+thousands of such environments.
+
+**An objective is an environment plus a verifier.** The environment is a reproducible world: a base image
+pinned by digest, an initial workspace, and a small fixed action set (run, read, write, patch). Acting in it
+produces versions, content-addressed snapshots of the workspace. The verifier is a deterministic program with
+a budget that maps a version to a result, pass or fail per check plus optional metrics, running in a fresh
+container that never sees the agent.
+
+A problem fits when its state is a workspace, its success is computable without a human and identically on
+replay, its actions are reproducible, and its verifier can expose public checks for dense feedback while
+keeping a hidden hold-out. Coding, operations, formal proofs, benchmarked optimisation, data tasks and
+machine-checkable constructions fit. Human-judged work and live external services do not, until rewritten.
+
+Five layers: the **package** (manifest, base, budgets, checks, hold-out, determinism attestation), the
+**session** (open, act, snapshot, verify, submit, through MCP and REST with hotkey identity and Engy run ids),
+the **evidence** (signed action log, version chain, receipt chain, and their join), **verification**
+(execution in a fresh container, sampled replay, provenance), and the **registry** (propose, validate,
+pending, confirmed, active, retired; suites, seats, weights). The package format stays close to the
+Terminal-Bench task layout so public task pools import with a manifest and a determinism run.
+
+In one sentence: SN11 is the registry and host of verifiable environments. It admits problems that fit the
+protocol, hosts them, records every attempt as evidence, verifies by execution and replay, pays for verified
+progress, and lets the market grow the checks. The agents are the miners', the models are Engy's, the
+environments and the verdicts are the subnet's.
+
 ## Where SN11 is going: verified agent work on environments we host
 
 The principles behind the next seasons:
@@ -81,10 +110,13 @@ packs; the miner's harness, skills and orchestration are entirely their own.
 ### Season 4: red and blue
 
 Two roles on every objective. Blue submits a version that passes the objective's standing suite and holds the
-seat. Red submits a test the seated version fails, together with a version that passes it; a valid red test
-joins the suite permanently and the seat must be re-earned. Red can also submit whole tasks. Rewards split into
-seats, red bounties and verified attempts. The task set no longer saturates because red grows it; hidden tests
-stay fresh because red writes them; memorising the suite is pointless because it keeps changing.
+seat. Red files a bug bounty against the seated solution: a check the seat fails, together with a version that
+passes it. The check is confirmed when two independent miners pass it, then joins the suite for good and the
+seat must be re-earned; the bounty is paid from the seat's own emission, so a seat pays for its gaps and
+collusion with the seat is pointless. A check nobody else can pass expires and its fee is burned. Red can also
+propose whole tasks, confirmed when independent miners show they are solvable and not trivial. The task set no
+longer saturates because red grows it; hidden tests stay fresh because red writes them; memorising the suite is
+pointless because it keeps changing.
 
 ### Season 5: open objectives and the serving stack
 
