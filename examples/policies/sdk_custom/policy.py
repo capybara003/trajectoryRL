@@ -1,4 +1,4 @@
-"""Example routing policy written against the trajrl_policy SDK.
+"""Example fusion policy written against the trajrl_policy SDK.
 
 Cheap writer by default; once the agent has taken more than 12 turns, or a stall / tool-error signal fires,
 switch the session to the strong model and ask one cheap adviser for a note on every strong turn.

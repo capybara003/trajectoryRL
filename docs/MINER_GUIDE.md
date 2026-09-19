@@ -1,8 +1,8 @@
 # Season 1 Miner Guide
 
-> **Season 2 (transition season, SPEC 25) is live.** Miners now submit a **routing policy** next to their
+> **Season 2 (transition season, SPEC 25) is live.** Miners now submit a **fusion policy** next to their
 > SKILL.md; the validator runs it in a sidecar and it decides which Engy models answer each request. Scoring is
-> unchanged. Read [ROUTING_POLICY.md](ROUTING_POLICY.md) first; this document describes the Season 1 mechanics
+> unchanged. Read [FUSION_POLICY.md](FUSION_POLICY.md) first; this document describes the Season 1 mechanics
 > that Season 2 reuses. SN11's next stage after the transition is RSI infrastructure.
 
 

@@ -42,7 +42,7 @@ vim SKILL.md
 # 2. Build pack
 trajectoryrl-miner build SKILL.md -o pack.json
 
-# Season 2: add your routing policy directory (policy.py or policy.json + helper files)
+# Season 2: add your fusion policy directory (policy.py or policy.json + helper files)
 trajectoryrl-miner build SKILL.md --policy ./my_policy -o pack.json
 
 # 3. Pay the submission fee and submit.

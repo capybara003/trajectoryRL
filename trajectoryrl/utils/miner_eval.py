@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Sequence
 
-from ..policy import extract_policy_files
+from ..policy import extract_policy_files, scan_policy_files
 from .commitments import MinerCommitment
 from .github import PackFetcher
 from .sandbox_harness import (
@@ -176,6 +176,10 @@ async def evaluate_miner_s1(
             skip_detail=str(e),
         )
     log.info("Policy files: %s", sorted(policy_files) or "<none: default pin policy>")
+    policy_scan = scan_policy_files(policy_files, scenarios or harness.sandbox_scenarios) if policy_files else {}
+    if policy_scan.get("scenario_hits"):
+        log.warning("Policy files name %d active scenarios verbatim: %s (shadow signal, not scored)",
+                    policy_scan["scenario_hits"], policy_scan["scenario_names"])
 
     skill_md = files.get("SKILL.md")
     if not isinstance(skill_md, str) or not skill_md.strip():
@@ -293,6 +297,8 @@ async def evaluate_miner_s1(
             "meter_refused": (meter.get("refused_cap") or 0) + (meter.get("refused_model") or 0),
             "provenance": meter.get("provenance"),
             "policy_setup_s": ep.policy_setup_s if ep is not None else None,
+            "policy_stalled": bool(getattr(ep, "policy_stalled", False)) if ep is not None else None,
+            "policy_scan": policy_scan or None,
         }
 
     return MinerEvalOutcome(

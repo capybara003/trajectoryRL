@@ -371,3 +371,12 @@ def test_runtime_passthrough_auth_headers(rt, monkeypatch):
     assert srv.hdr_for(None)["Authorization"] == f"Bearer {rt.EPISODE_TOKEN}"
     monkeypatch.setattr(rt, "UPSTREAM_AUTH", "token")
     assert srv.hdr_for("Bearer sk-customer")["Authorization"] == f"Bearer {rt.EPISODE_TOKEN}"
+def test_scan_policy_files_flags_dispatch_and_blobs():
+    from trajectoryrl.policy import scan_policy_files
+    names = ("git-leak-recovery", "postgres-csv-clean", "puzzle-solver")
+    clean = {"policy.py": "req['model'] = 'glm-5.3-flash' if 'git' in txt else 'kimi-k3'"}
+    r = scan_policy_files(clean, names)
+    assert r["scenario_hits"] == 0 and r["b64_blobs"] == 0
+    bad = {"policy.py": "TABLE = {'git-leak-recovery': 'kimi-k3', 'puzzle-solver': 'glm-5.3'}\nPAYLOAD = '" + ("QUJD" * 60) + "'\nMSG = 'x' * 1"}
+    r = scan_policy_files(bad, names)
+    assert r["scenario_hits"] == 2 and set(r["scenario_names"]) == {"git-leak-recovery", "puzzle-solver"} and r["b64_blobs"] == 1 and r["long_literals"] >= 1
