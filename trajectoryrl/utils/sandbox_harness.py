@@ -1880,21 +1880,14 @@ class TrajectorySandboxHarness:
         ep_token = meter.mint(f"{session_id}/{scenario}", EPISODE_CAP_USD)
         pnet = None
         sidecar = None
-        # Season 2: the agent's model endpoint is the policy sidecar on the
-        # episode's internal network, so the scenario container needs no
-        # internet and starts directly on that network (no egress: a pack
-        # cannot have the agent fetch answers from an outside model). The
-        # verifier container is separate and keeps its egress for installs.
-        # TRAJRL_SCENARIO_NET=bridge restores the Season 1 egress for lab
-        # comparisons only.
-        legacy_bridge = os.environ.get("TRAJRL_SCENARIO_NET") == "bridge"
         try:
-            pnet = self._create_episode_network(session_id, scenario)
             sandbox = self.client.containers.run(
                 scenario_image,
                 name=f"sandbox_{session_id}_{scenario.replace('/', '_')}",
                 detach=True,
-                network=("bridge" if legacy_bridge else pnet.name),
+                # Default bridge → internet egress for both the agent
+                # (LLM API) and the verifier (apt + uv installs).
+                network="bridge",
                 environment={
                     "LLM_API_KEY":  ep_token,
                     "LLM_BASE_URL": f"http://{POLICY_ALIAS}:{POLICY_PORT}/v1",
@@ -1958,9 +1951,8 @@ class TrajectorySandboxHarness:
                 "mkdir -p /opt/data && chown -R hermes:hermes /opt/data",
             ])
 
-            sidecar, episode.policy_setup_s = self._start_policy_sidecar(
-                session_id, scenario, sandbox, ep_token, policy_files or {}, pnet,
-                attach_sandbox=legacy_bridge,
+            pnet, sidecar, episode.policy_setup_s = self._start_policy_sidecar(
+                session_id, scenario, sandbox, ep_token, policy_files or {},
             )
 
             harness_prompt = (
@@ -2163,15 +2155,13 @@ class TrajectorySandboxHarness:
             )
         finally:
             meter.close(ep_token)
-            self._stop_policy_sidecar(session_id, scenario, sidecar, None, sandbox)
+            self._stop_policy_sidecar(session_id, scenario, sidecar, pnet, sandbox)
             if sandbox:
                 try:
                     sandbox.stop(timeout=5)
                     sandbox.remove(force=True, v=True)
                 except Exception:
                     pass
-            if pnet is not None:
-                self._remove_episode_network(session_id, scenario, pnet)
             if on_container_finished is not None:
                 try:
                     on_container_finished()
@@ -2216,31 +2206,26 @@ class TrajectorySandboxHarness:
             self._self_container = None
         return self._self_container
 
-    def _create_episode_network(self, session_id: str, scenario: str):
-        """The episode's private, internal (no egress) docker network."""
+    def _start_policy_sidecar(
+        self, session_id: str, scenario: str, sandbox: Container, token: str,
+        policy_files: Dict[str, str],
+    ) -> tuple:
+        """Create the episode's internal network, start the policy sidecar
+        on it with the miner's files + the runtime, attach the scenario
+        container, and wait for the policy to answer /v1/models.
+
+        Returns (network, sidecar, setup_seconds). Raises on failure (a
+        policy that never comes up is the miner's failure and scores the
+        episode 0 with the reason in error.txt; an unreachable meter is
+        ours and shows up the same way in the log)."""
+        t0 = time.time()
         safe = scenario.replace("/", "_")
-        return self.client.networks.create(
+        net = self.client.networks.create(
             f"pnet_{session_id}_{safe}", driver="bridge", internal=True,
             labels={"trajectoryrl.role": "policy-net",
                     "trajectoryrl.session": session_id,
                     "trajectoryrl.scenario": scenario},
         )
-
-    def _start_policy_sidecar(
-        self, session_id: str, scenario: str, sandbox: Container, token: str,
-        policy_files: Dict[str, str], net, attach_sandbox: bool = False,
-    ) -> tuple:
-        """Start the policy sidecar on the episode network with the miner's
-        files + the runtime, and wait for the policy to answer /v1/models.
-        ``attach_sandbox`` connects a bridge-started scenario container to
-        the network (legacy lab mode); normally it already lives there.
-
-        Returns (sidecar, setup_seconds). Raises on failure (a policy that
-        never comes up is the miner's failure and scores the episode 0 with
-        the reason in error.txt; an unreachable meter is ours and shows up
-        the same way in the log)."""
-        t0 = time.time()
-        safe = scenario.replace("/", "_")
         meter_port = self._ensure_meter().port
         own = self._own_container()
         if own is not None:
@@ -2294,21 +2279,16 @@ class TrajectorySandboxHarness:
             # docker-py 7.x cannot set an alias at create time: reconnect with it.
             net.disconnect(sidecar)
             net.connect(sidecar, aliases=[POLICY_ALIAS])
-            if attach_sandbox:
-                net.connect(sandbox)
+            net.connect(sandbox)
             self._wait_policy_healthy(sandbox, sidecar)
         except Exception:
-            # the caller never gets the sidecar handle, so remove it here;
-            # the network is torn down by the episode's finally block
-            try:
-                sidecar.remove(force=True, v=True)
-            except Exception:  # noqa: BLE001
-                pass
+            # the caller never gets the handles, so tear down here
+            self._stop_policy_sidecar(session_id, scenario, sidecar, net, sandbox)
             raise
         setup_s = round(time.time() - t0, 2)
         logger.info("[%s] %s policy sidecar ready in %.1fs (files=%s, upstream=%s)",
                     session_id, scenario, setup_s, sorted(policy_files) or ["<default pin>"], upstream)
-        return sidecar, setup_s
+        return net, sidecar, setup_s
 
     def _wait_policy_healthy(self, sandbox: Container, sidecar: Container) -> None:
         deadline = time.time() + SIDECAR_HEALTH_TIMEOUT_S
@@ -2357,22 +2337,8 @@ class TrajectorySandboxHarness:
             pass
         return "\n".join(parts)
 
-    def _remove_episode_network(self, session_id: str, scenario: str, net) -> None:
-        """Detach the validator (in-docker mode) and remove the episode network; the
-        scenario container and sidecar must already be gone."""
-        own = self._own_container()
-        if own is not None:
-            try:
-                net.disconnect(own, force=True)
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            net.remove()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[%s] %s could not remove policy network: %s", session_id, scenario, e)
-
     def _stop_policy_sidecar(self, session_id: str, scenario: str, sidecar, net, sandbox) -> None:
-        """Best-effort teardown: sidecar, then (legacy) detach and remove ``net`` if given."""
+        """Best-effort teardown: sidecar, then detach everything, then the network."""
         if sidecar is not None:
             try:
                 sidecar.stop(timeout=3)
