@@ -206,6 +206,31 @@ cost.
 Two local runs on one machine: the harness removes every trajectoryrl container on the host when a session
 starts. Set `TRAJRL_SKIP_ORPHAN_SCAN=1` for local runs that overlap (never on a validator).
 
+### Fast inner loop without Docker
+
+The runtime that the validator copies into the sidecar is one file and runs anywhere. Point it at Engy with
+your own key as the token and it becomes a local OpenAI-compatible endpoint serving your policy:
+
+```bash
+cd my_policy   # contains policy.py or policy.json
+POLICY_PORT=8800 POLICY_DIR=. UPSTREAM_URL=https://api.engy.ai/v1 EPISODE_TOKEN=$ENGY_API_KEY \
+  python /path/to/trajectoryRL/trajectoryrl/policy/runtime/trajrl_policy.py
+# any OpenAI client, or Hermes / OpenCode with base URL http://localhost:8800/v1 and model "auto"
+curl -s localhost:8800/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"hello"}],"max_tokens":200}'
+```
+
+Every turn is logged as JSON on stdout (model chosen, tokens, latency). No cap and no meter in this mode; it
+is for iterating on prompts and routing logic. When it behaves, run `scripts/eval_pack.py` for the real
+thing: the sidecar, the meter, the scenarios and the verifier exactly as validators run them.
+
+### What a local eval leaves behind
+
+`eval_output/episodes/<scenario>/`: `policy.log` (your policy's own log), `meter.json` (every model call
+with tokens, cost, clamps, refusals, and the provenance result), `testee_transcript.txt` (what Hermes did),
+`evaluation.json` (verifier result, cost by model, setup time, stall flag), and `error.txt` when the sidecar
+failed to start (the traceback is in it).
+
 ---
 
 ## Baselines (26 SPEC-25 scenarios, one trial each, run through this exact harness on 2026-09-18)
