@@ -39,6 +39,54 @@ scenario, Winsorized consensus across validators, winner-take-all seat with the 
 
 ---
 
+## Quick start
+
+**1. Install.** `git clone https://github.com/trajectoryRL/trajectoryRL && cd trajectoryRL && pip install -e .`
+You also need Docker and an Engy API key (https://api.engy.ai). Local runs use your key; validators pay for the
+real evaluations.
+
+**2. Write a policy**: a directory with `policy.json` (no code) or `policy.py`.
+
+```json
+{"kind": "advisers", "writer": "kimi-k3", "advisers": ["deepseek-v4.1-flash", "qwen3.8-27b", "glm-5.3-flash"]}
+```
+
+```python
+from trajrl_policy import Policy, serve
+
+class Mine(Policy):
+    async def handle(self, req, ctx):
+        req["model"] = "kimi-k3" if "toolerr" in ctx.signals() else "glm-5.3-flash"
+        return await ctx.upstream(req)   # streams through
+
+serve(Mine())
+```
+
+Or a raw `policy.py` that serves `/v1/chat/completions` itself. Examples with measured scores are in
+`examples/policies/`; the three shapes are described under "Writing a policy" below.
+
+**3. Test fast, no Docker**: your policy as a local endpoint for any OpenAI client, Hermes or OpenCode.
+
+```bash
+POLICY_PORT=8800 POLICY_DIR=./my_policy UPSTREAM_URL=https://api.engy.ai/v1 EPISODE_TOKEN=$ENGY_API_KEY \
+  python trajectoryrl/policy/runtime/trajrl_policy.py
+# base URL http://localhost:8800/v1, model "auto"; every turn is logged as JSON on stdout
+```
+
+**4. Test for real**: the exact validator code, with the sidecar, the meter and the verifier, on scenarios you pick.
+
+```bash
+trajectoryrl-miner build SKILL.md --policy ./my_policy -o pack.json
+trajectoryrl-miner validate pack.json
+LLM_API_KEY=$ENGY_API_KEY python scripts/eval_pack.py --pack pack.json -o ./out --scenarios git-leak-recovery,postgres-csv-clean
+```
+
+Per scenario you get `policy.log`, `meter.json` (every call, cost, clamps, provenance), the agent transcript,
+and `error.txt` if the policy failed to start. Details under "Local testing" below.
+
+**5. Submit.** `trajectoryrl-miner web-submit pack.json`, same as Season 1. Packs under 32 KB, SKILL.md still
+required. The first pack through pre-eval starts the next epoch.
+
 ## How an episode runs
 
 ```
