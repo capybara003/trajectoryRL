@@ -53,6 +53,10 @@ EPISODE_TOKEN = os.environ.get("EPISODE_TOKEN", "")
 POLICY_DIR = os.environ.get("POLICY_DIR", "/policy")
 POLICY_LOG = os.environ.get("POLICY_LOG", "")
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "qwen3.8-27b")
+# UPSTREAM_AUTH=token (default): every upstream call carries EPISODE_TOKEN (validator sidecar).
+# UPSTREAM_AUTH=passthrough: the caller's own Authorization header is forwarded instead, so the same runtime
+# can serve a policy as a product endpoint (Engy "auto mode"): the customer's key pays, per request.
+UPSTREAM_AUTH = os.environ.get("UPSTREAM_AUTH", "token")
 
 _log_fh = open(POLICY_LOG, "a") if POLICY_LOG else None
 
@@ -148,16 +152,21 @@ class UpstreamResponse:
 class Ctx:
     """Per-request context handed to ``Policy.handle``."""
 
-    def __init__(self, server: "Server", msgs: list[dict], sess: dict, req_id: str):
+    def __init__(self, server: "Server", msgs: list[dict], sess: dict, req_id: str, auth: str | None = None):
         self._server = server; self.messages = msgs; self.session = sess; self.req_id = req_id
         self.remaining_usd: float | None = server.remaining_usd
+        self._auth = auth   # caller's Authorization header when UPSTREAM_AUTH=passthrough
+
+    @property
+    def hdr(self) -> dict:
+        return self._server.hdr_for(self._auth)
 
     def signals(self, **kw) -> list[str]:
         return transcript_signals(self.messages, self.session, **kw)
 
     async def upstream(self, req: dict) -> UpstreamResponse:
         """Forward ``req`` to the meter. Streaming requests stream; the server pipes the result to Hermes."""
-        return await self._server.upstream(req, self.session)
+        return await self._server.upstream(req, self.session, self._auth)
 
     async def call(self, model: str, messages: list[dict], max_tokens: int = 600, temperature: float = 0.7,
                    timeout_s: float = 120.0, **gen) -> dict:
@@ -167,7 +176,7 @@ class Ctx:
         t0 = time.time()
         try:
             async with ClientSession(timeout=ClientTimeout(total=timeout_s)) as cs:
-                async with cs.post(f"{UPSTREAM_URL}/chat/completions", json=body, headers=self._server.hdr) as up:
+                async with cs.post(f"{UPSTREAM_URL}/chat/completions", json=body, headers=self.hdr) as up:
                     status = up.status; data = await up.read()
             self._server.note_budget(up.headers)
             d = json.loads(data) if status == 200 else {}
@@ -315,6 +324,12 @@ class Server:
         self.app.router.add_get("/v1/models", self.models)
         self.app.router.add_get("/health", self.health)
 
+    def hdr_for(self, auth: str | None) -> dict:
+        """Upstream headers: the episode token, or the caller's own Authorization in passthrough mode."""
+        if UPSTREAM_AUTH == "passthrough" and auth:
+            return {"Authorization": auth, "Content-Type": "application/json"}
+        return self.hdr
+
     def note_budget(self, headers) -> None:
         v = headers.get("x-trajrl-budget-remaining-usd")
         if v is not None:
@@ -326,6 +341,8 @@ class Server:
     async def refresh_budget(self) -> None:
         """Ask the meter for the authoritative remaining budget (a streamed
         response's header is computed before the call)."""
+        if UPSTREAM_AUTH == "passthrough":
+            return   # no per-episode budget in product mode
         try:
             async with ClientSession(timeout=ClientTimeout(total=5)) as cs:
                 async with cs.get(f"{UPSTREAM_URL}/budget", headers=self.hdr) as r:
@@ -334,14 +351,15 @@ class Server:
         except Exception:  # noqa: BLE001
             pass
 
-    async def upstream(self, req: dict, sess: dict) -> UpstreamResponse:
+    async def upstream(self, req: dict, sess: dict, auth: str | None = None) -> UpstreamResponse:
         stream = bool(req.get("stream"))
         if stream:
             req.setdefault("stream_options", {})["include_usage"] = True
         retries = 0
+        hdr = self.hdr_for(auth)
         cs = ClientSession(timeout=ClientTimeout(total=900))
         while True:
-            up = await cs.post(f"{UPSTREAM_URL}/chat/completions", json=req, headers=self.hdr)
+            up = await cs.post(f"{UPSTREAM_URL}/chat/completions", json=req, headers=hdr)
             self.note_budget(up.headers)
             if up.status in (429, 503) and retries < 6:
                 await up.read(); up.release(); retries += 1; await asyncio.sleep(1.5 * retries); continue
@@ -370,7 +388,7 @@ class Server:
         sk = session_key(msgs); sess = self.sessions.setdefault(sk, {"t0": time.time(), "turn": 0})
         sess["turn"] += 1
         stream = bool(body.get("stream")); req_id = f"chatcmpl-{sk}-{sess['turn']}"
-        ctx = Ctx(self, msgs, sess, req_id)
+        ctx = Ctx(self, msgs, sess, req_id, auth=request.headers.get("Authorization"))
         try:
             result = await self.policy.handle(body, ctx)
         except Exception as e:  # noqa: BLE001
