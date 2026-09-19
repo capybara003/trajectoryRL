@@ -20,10 +20,10 @@ they are sent. The validator runs it in a sidecar next to the scenario container
 Harness, scenarios, verifier and consensus are unchanged from Season 1. The score is still the scenario sum;
 cost is measured and shown on the leaderboard.
 
-A fusion policy has exactly the shape of a product: a per-request model that any harness can point at. The
-policy that holds the seat is served on Engy as its **auto mode** (`engy/auto`), the same models at the same
-prices, usable by every Engy customer as soon as it takes the seat. Miners are writing the routing layer of a
-live inference product, not only competing for emission.
+A fusion policy has exactly the shape of a product: a per-request model that any harness can point at. We
+will serve the policy that holds the seat on Engy as its **auto mode** (`engy/auto`), the same models at the
+same prices, for every Engy customer. The policy that wins the seat becomes the fusion layer of a live
+inference product; miners are not only competing for emission.
 
 Why a transition: the rebuild below takes longer than we were willing to leave Season 1 running, and routing
 policies are the one piece of it that could ship on the existing harness today. Details:
