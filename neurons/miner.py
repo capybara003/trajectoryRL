@@ -360,7 +360,7 @@ Examples:
     p_build.add_argument("skill_md", help="Path to SKILL.md file")
     p_build.add_argument("--output", "-o", default="pack.json", help="Output path")
     p_build.add_argument("--policy", default=None,
-                         help="Directory with the routing policy (policy.py or policy.json + helpers); Season 2")
+                         help="Directory with the fusion policy (policy.py or policy.json + helpers); Season 2")
 
     # validate
     p_validate = sub.add_parser("validate", help="Validate pack.json locally")

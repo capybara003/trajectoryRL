@@ -1,6 +1,6 @@
 # TrajectoryRL
 
-> **Season 2 (transition): routing policies.** Miners submit a routing policy that picks Engy models per request; see [docs/ROUTING_POLICY.md](docs/ROUTING_POLICY.md). Where SN11 goes next: [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Season 2 (transition): fusion policies.** Miners submit a fusion policy that picks Engy models per request; see [docs/FUSION_POLICY.md](docs/FUSION_POLICY.md). Where SN11 goes next: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 > **Bittensor Subnet 11** — A reinforcement learning playground that continuously produces state-of-the-art skills for AI agents
 

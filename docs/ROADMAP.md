@@ -12,22 +12,22 @@ against a rotating set of terminal tasks with hidden tests, and the best file to
 What it taught us: a skill file is cheap to write and cheap to copy, the task set saturates within weeks, and a
 single fixed model is a hard ceiling on what any skill can reach.
 
-## Season 2 (September 2026, the transition season): routing policies
+## Season 2 (September 2026, the transition season): fusion policies
 
-The object of competition becomes the **routing policy**: a program shipped next to `SKILL.md` that sits between
+The object of competition becomes the **fusion policy**: a program shipped next to `SKILL.md` that sits between
 the agent harness and the Engy model catalog and decides, per request, which open-weight models answer and what
 they are sent. The validator runs it in a sidecar next to the scenario container and meters every model call.
 Harness, scenarios, verifier and consensus are unchanged from Season 1. The score is still the scenario sum;
 cost is measured and shown on the leaderboard.
 
-A routing policy has exactly the shape of a product: a per-request model that any harness can point at. The
+A fusion policy has exactly the shape of a product: a per-request model that any harness can point at. The
 policy that holds the seat is served on Engy as its **auto mode** (`engy/auto`), the same models at the same
 prices, usable by every Engy customer as soon as it takes the seat. Miners are writing the routing layer of a
 live inference product, not only competing for emission.
 
 Why a transition: the rebuild below takes longer than we were willing to leave Season 1 running, and routing
 policies are the one piece of it that could ship on the existing harness today. Details:
-[ROUTING_POLICY.md](ROUTING_POLICY.md).
+[FUSION_POLICY.md](FUSION_POLICY.md).
 
 ## Why now
 

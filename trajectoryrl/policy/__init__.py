@@ -1,6 +1,6 @@
 """Routing-policy evaluation (SN11 Season 2).
 
-A miner's pack carries a routing policy (``policy.py`` or ``policy.json``) that the validator runs in a sidecar
+A miner's pack carries a fusion policy (``policy.py`` or ``policy.json``) that the validator runs in a sidecar
 container next to the scenario container. Hermes talks to the sidecar as if it were the LLM; the sidecar can only
 reach the validator's metering proxy (``PolicyMeter``), which forwards to Engy with the operator's key, enforces the
 model allowlist and a per-episode safety cap, and records every call. The runtime shipped into the sidecar lives in

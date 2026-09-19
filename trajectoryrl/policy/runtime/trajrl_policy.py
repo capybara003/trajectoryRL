@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""trajrl_policy: the runtime a miner's routing policy runs in (SN11 Season 2, "routing policies").
+"""trajrl_policy: the runtime a miner's fusion policy runs in (SN11 Season 2, "fusion policies").
 
 The validator copies this file into the policy sidecar next to the miner's pack files and runs it as a script.
 It serves an OpenAI-compatible ``/v1/chat/completions`` to the Hermes harness and forwards model calls to the
