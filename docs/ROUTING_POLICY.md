@@ -11,7 +11,7 @@
 > consensus unchanged and changes only the object of competition: the miner's **routing policy** over
 > the Engy model catalog. Expect Season 2 to be superseded when the RSI platform launches; the policies
 > written for it remain useful, because a good routing policy is exactly the per-request "auto" model
-> Engy will serve.
+> Engy will serve. The full sequence of seasons is in [ROADMAP.md](ROADMAP.md).
 
 **Scoring**: programmatic verifier, quality summed across the active scenario set (unchanged from Season 1)
 **Spec**: 25 (same 26 scenarios as SPEC 24; new testee: your routing policy)
