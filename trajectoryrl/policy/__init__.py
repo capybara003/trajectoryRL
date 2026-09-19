@@ -77,3 +77,44 @@ def extract_policy_files(pack: dict) -> dict[str, str]:
     if total > POLICY_FILES_MAX_BYTES:
         raise ValueError(f"policy files too large: {total} bytes (max {POLICY_FILES_MAX_BYTES})")
     return out
+
+
+# ---------------------------------------------------------------------------
+# Shadow static scan of policy files (Season 2). Records signals of
+# scenario-identity dispatch and hidden payloads; reported with the score,
+# NOT scored. The web's LLM audit covers SKILL.md at launch; this is the
+# validator-side signal for policy code until that audit reads code too.
+# ---------------------------------------------------------------------------
+import base64 as _b64
+import re as _re
+
+_B64_BLOB = _re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
+_STRING_LIT = _re.compile(r"(['\"])(?:(?!\1).){40,}\1")
+
+
+def scan_policy_files(files: dict[str, str], scenario_names: "tuple[str, ...] | list[str]") -> dict:
+    """Cheap, deterministic signals over the policy files.
+
+    - scenario_hits: how many active scenario names appear verbatim (scenario-identity dispatch)
+    - scenario_names: which ones (first 10)
+    - long_literals: string literals of 40+ chars (canned outputs, templates)
+    - b64_blobs: base64-looking runs of 200+ chars (hidden payloads)
+    - bytes: total policy bytes
+    """
+    text = "\n".join(files.get(k, "") for k in sorted(files))
+    low = text.lower()
+    hits = [n for n in scenario_names if n.lower() in low]
+    blobs = 0
+    for m in _B64_BLOB.finditer(text):
+        try:
+            _b64.b64decode(m.group(0) + "=" * (-len(m.group(0)) % 4), validate=False)
+            blobs += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "scenario_hits": len(hits),
+        "scenario_names": hits[:10],
+        "long_literals": len(_STRING_LIT.findall(text)),
+        "b64_blobs": blobs,
+        "bytes": len(text.encode("utf-8")),
+    }
