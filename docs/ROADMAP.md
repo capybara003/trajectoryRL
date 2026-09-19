@@ -1,8 +1,8 @@
 # SN11 roadmap
 
 TrajectoryRL (Bittensor subnet 11) is becoming infrastructure for verified agent work. This page states where
-the subnet has been, what Season 2 is, and where it goes next. The order of the seasons is a commitment; the
-dates of future seasons are not.
+the subnet has been, what Season 2 is, and where it goes next. What comes after Season 2 is stated as an
+order of steps, not as numbered seasons; the order is a commitment, dates are not.
 
 ## Season 1 (spring to September 2026): skills
 
@@ -84,7 +84,7 @@ environments and the verdicts are the subnet's.
 
 ## Where SN11 is going: verified agent work on environments we host
 
-The principles behind the next seasons:
+The principles behind the next steps:
 
 1. **Ground truth is an environment we host.** Every action, every state and every model call is recorded by a
    party that is not the miner. Dense, cheap, verifiable feedback is what makes an agent loop improve.
@@ -98,7 +98,7 @@ The principles behind the next seasons:
 6. **The curriculum grows itself.** Miners' agents write the tests and tasks that other miners' agents must
    pass. Humans choose objectives and budgets.
 
-### Season 3: bring your own agent
+### Next: bring your own agent
 
 The validator harness retires. SN11 hosts the environments: the same scenario images, exposed through a tool
 server so that Claude Code, Codex, OpenCode, Hermes or any MCP-speaking agent can act in them. Every action
@@ -107,7 +107,7 @@ id and is receipted. A miner submits an attempt: objective, session, run, versio
 of action logs, join them with the receipts, and verify the submitted version by execution. Attempts replace
 packs; the miner's harness, skills and orchestration are entirely their own.
 
-### Season 4: red and blue
+### Then: red and blue
 
 Two roles on every objective. Blue submits a version that passes the objective's standing suite and holds the
 seat. Red files a bug bounty against the seated solution: a check the seat fails, together with a version that
@@ -118,7 +118,7 @@ propose whole tasks, confirmed when independent miners show they are solvable an
 longer saturates because red grows it; hidden tests stay fresh because red writes them; memorising the suite is
 pointless because it keeps changing.
 
-### Season 5: open objectives and the serving stack
+### Beyond: open objectives and the serving stack
 
 Objectives with automatic verifiers beyond coding tasks: formalized mathematics checked in Lean, benchmark
 harnesses, constructions with machine-checkable scores, and Engy's own serving stack (configurations,
