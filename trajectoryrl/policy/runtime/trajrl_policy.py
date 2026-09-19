@@ -318,17 +318,17 @@ class Server:
         self.policy = policy
         self.hdr = {"Authorization": f"Bearer {EPISODE_TOKEN}", "Content-Type": "application/json"}
         self.sessions: dict[str, dict] = {}
+        self.remaining_usd: float | None = None
+        self.app = web.Application(client_max_size=64 * 1024 * 1024)
+        self.app.router.add_post("/v1/chat/completions", self.chat)
+        self.app.router.add_get("/v1/models", self.models)
+        self.app.router.add_get("/health", self.health)
 
     def hdr_for(self, auth: str | None) -> dict:
         """Upstream headers: the episode token, or the caller's own Authorization in passthrough mode."""
         if UPSTREAM_AUTH == "passthrough" and auth:
             return {"Authorization": auth, "Content-Type": "application/json"}
         return self.hdr
-        self.remaining_usd: float | None = None
-        self.app = web.Application(client_max_size=64 * 1024 * 1024)
-        self.app.router.add_post("/v1/chat/completions", self.chat)
-        self.app.router.add_get("/v1/models", self.models)
-        self.app.router.add_get("/health", self.health)
 
     def note_budget(self, headers) -> None:
         v = headers.get("x-trajrl-budget-remaining-usd")

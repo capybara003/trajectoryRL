@@ -366,6 +366,7 @@ def test_drain_aborts_on_should_abort():
 def test_runtime_passthrough_auth_headers(rt, monkeypatch):
     monkeypatch.setattr(rt, "UPSTREAM_AUTH", "passthrough")
     srv = rt.Server(rt.PinPolicy("glm-5.3-flash"))
+    assert {r.resource.canonical for r in srv.app.router.routes()} >= {"/v1/chat/completions", "/v1/models", "/health"}
     assert srv.hdr_for("Bearer sk-customer")["Authorization"] == "Bearer sk-customer"
     assert srv.hdr_for(None)["Authorization"] == f"Bearer {rt.EPISODE_TOKEN}"
     monkeypatch.setattr(rt, "UPSTREAM_AUTH", "token")
