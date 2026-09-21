@@ -217,6 +217,49 @@ SCENARIOS_BY_SPEC: Dict[int, tuple[str, ...]] = {
 # allowlist replaces the pinned qwen3.8-27b, so scores are not comparable.
 SCENARIOS_BY_SPEC[25] = SCENARIOS_BY_SPEC[24]
 
+# SPEC 26 — drop 6 low-signal / high-cost scenarios, 26 -> 20. Unlike SPEC 24
+# (which swapped to keep N=26), this SHRINKS the set, so maxScore drops 26 -> 20
+# on the web side (removedScenarioBase stays 0). That is an intentional
+# max-score discontinuity, like SPEC 16 — the point of the bump.
+#
+# Chosen from a cross-pack discrimination pass over 614 distinct spec-24/25
+# challenger packs (per-scenario stddev across packs, with infra-failed
+# sessions stripped out: a session only counts if >=2 of its scenarios scored
+# > 0, so the recent all-discarded outage cannot masquerade as "everyone 0").
+# Each dropped scenario adds ~a constant to every pack's score, so removing it
+# does not change the miner ranking:
+#   regex-chess            std 0.034, 92% of packs score 0   (dead: nobody solves it) + 2100s
+#   race-condition-fix     std 0.047, 69% full                (saturated: everyone solves) + only 4-CPU scenario
+#   custom-memory-heap-crash std 0.097                        (low signal) + 2400s (agent 1800)
+#   attention-mil          std 0.133, 89% full                (saturated) + 5.2 GB image
+#   git-leak-recovery      std 0.063, 75% full                (saturated, cheap)
+#   tree-directory-parser  std 0.076, all packs cluster ~0.78 (no separation, cheap)
+# Kept the expensive-but-discriminating ones (torch-tensor 0.249, path-tracing
+# 0.262, llm-inference-batching 0.233): they cost a lot but genuinely separate
+# top policies from the rest.
+SCENARIOS_BY_SPEC[26] = (
+    "audio-synth-stft-peaks",
+    "configure-git-webserver",
+    "crack-7z-hash",
+    "db-wal-recovery",
+    "deterministic-tarball",
+    "fix-code-vulnerability",
+    "git-multibranch",
+    "large-scale-text-editing",
+    "largest-eigenval",
+    "llm-inference-batching-scheduler",
+    "nginx-request-logging",
+    "parallel-particle-simulator",
+    "path-tracing",
+    "postgres-csv-clean",
+    "puzzle-solver",
+    "query-optimize",
+    "regex-engine-from-scratch",
+    "swe-bench-astropy-2",
+    "torch-tensor-parallelism",
+    "write-compressor",
+)
+
 SANDBOX_SCENARIOS: tuple[str, ...] = SCENARIOS_BY_SPEC[SPEC_NUMBER]
 
 
