@@ -36,6 +36,7 @@ import json
 import logging
 import math
 import queue
+import re
 import secrets
 import tarfile
 import threading
@@ -921,6 +922,50 @@ def _strip_provider_prefix(model: str) -> str:
         if model.startswith(prefix):
             return model[len(prefix):]
     return model
+
+
+# Kernel-visible markers of THIS process's docker container id, in order of
+# preference. cgroup v1 puts it in the path (``/docker/<id>`` or systemd
+# ``docker-<id>.scope``); mountinfo carries it in the bind mounts of the
+# container's own ``/etc/{resolv.conf,hostname,hosts}`` under
+# ``/var/lib/docker/containers/<id>/``. Both are the *live* id, unlike the
+# hostname (which watchtower freezes at a dead container's id on recreate).
+# Overlay *layer* hashes are also 64-hex, so we never match a bare hex run —
+# only these anchored contexts.
+_CONTAINER_ID_PATTERNS = (
+    re.compile(r"/docker[/-]([0-9a-f]{64})"),
+    re.compile(r"/containers/([0-9a-f]{64})"),
+)
+
+
+def _parse_container_id(text: str) -> Optional[str]:
+    """Extract a docker container id from a cgroup / mountinfo blob, or None.
+
+    Only anchored contexts count (``/docker/<id>``, ``docker-<id>.scope``,
+    ``/containers/<id>/``) so overlay layer hashes — also 64 hex — are never
+    misread as the container id."""
+    for pat in _CONTAINER_ID_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _detect_own_container_id(
+    proc_paths: Sequence[str] = ("/proc/self/cgroup", "/proc/self/mountinfo"),
+) -> Optional[str]:
+    """Best-effort resolve THIS process's *live* docker container id from the
+    kernel, independent of the container hostname. Returns None when nothing
+    matches (cgroup v2 ``0::/`` with no id, non-docker host, k8s slices, …)."""
+    for path in proc_paths:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                cid = _parse_container_id(fh.read())
+        except OSError:
+            continue
+        if cid:
+            return cid
+    return None
 
 
 def _looks_like_provider_failure(episodes: List["_EpisodeResult"]) -> bool:
@@ -2203,17 +2248,48 @@ class TrajectorySandboxHarness:
     def _own_container(self) -> Optional[Container]:
         """The validator's own container when running inside docker (the
         compose deployment), else None (host process, e.g. eval_pack.py).
-        Under compose the hostname is the container id."""
+
+        Resolves the *live* container id from the kernel first and only
+        falls back to ``socket.gethostname()``. The hostname alone is not
+        enough: watchtower recreates the container on every image update
+        and carries over the old container's frozen ``Hostname`` (a
+        long-dead id), so ``containers.get(hostname)`` 404s. When that
+        happens the meter route silently degrades to the episode-network
+        gateway, which is unreachable on an internal (no-egress) network —
+        every episode's model calls fail and the whole eval is discarded.
+        """
         if self._self_container_checked:
             return self._self_container
         self._self_container_checked = True
         if not os.path.exists("/.dockerenv"):
             return None
-        try:
-            self._self_container = self.client.containers.get(socket.gethostname())
-        except Exception as e:  # noqa: BLE001
-            logger.warning("running in docker but cannot resolve own container: %s", e)
-            self._self_container = None
+
+        candidates: List[str] = []
+        live_id = _detect_own_container_id()
+        if live_id:
+            candidates.append(live_id)
+        hostname = socket.gethostname()
+        if hostname and hostname not in candidates:
+            candidates.append(hostname)
+
+        last_err: Optional[Exception] = None
+        for cand in candidates:
+            try:
+                self._self_container = self.client.containers.get(cand)
+                return self._self_container
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+
+        logger.error(
+            "running in docker but cannot resolve own container (tried %s: %s). "
+            "The policy meter route will fall back to the episode-network "
+            "gateway, which is unreachable on an internal (no-egress) network: "
+            "every episode's model calls will fail and evals will be discarded "
+            "as provider failures. This is the watchtower frozen-hostname mode "
+            "(hostname pinned to a dead container id).",
+            candidates, last_err,
+        )
+        self._self_container = None
         return self._self_container
 
     def _create_episode_network(self, session_id: str, scenario: str):

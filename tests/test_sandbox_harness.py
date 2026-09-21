@@ -17,7 +17,9 @@ from trajectoryrl.utils.sandbox_harness import (
     _drain_exec_stream_with_deadline,
     _episode_incomplete_no_progress,
     _EpisodeResult,
+    _detect_own_container_id,
     _looks_like_provider_failure,
+    _parse_container_id,
     _parse_ctrf_correctness,
     _parse_session_cost,
     _pick_episode_timeout,
@@ -1912,3 +1914,134 @@ class TestRetryEpisodeOnIncomplete:
         )
         assert calls["n"] == 1             # no retry attempted
         assert slept == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: own-container resolution (watchtower frozen-hostname failure mode)
+#
+# Under watchtower's recreate-on-update the container inherits the *old*
+# container's frozen ``Hostname`` (a long-dead id), so resolving the own
+# container by ``socket.gethostname()`` 404s and the policy-meter route
+# silently degrades to the episode-network gateway — unreachable on an
+# internal (no-egress) network, so every episode's model calls fail and the
+# whole eval is discarded. Resolve the *live* id from the kernel instead.
+# ---------------------------------------------------------------------------
+
+_ID_A = "a7b993ebfb1c274658dc0f95e6c1e1a1278a004e385ca30fa0826dec3a6c961e"
+_ID_B = "bbbb111122223333444455556666777788889999aaaabbbbccccddddeeeeffff"
+# A 64-hex overlay *layer* hash — must NOT be mistaken for the container id.
+_LAYER = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+
+class _NotFound(Exception):
+    """Stand-in for docker.errors.NotFound (the code catches bare Exception)."""
+
+
+class TestParseContainerId:
+    def test_mountinfo_containers_path(self):
+        text = (
+            "1234 1120 0:52 /var/lib/docker/containers/%s/resolv.conf "
+            "/etc/resolv.conf rw,relatime shared:1 - ext4 /dev/root rw\n"
+        ) % _ID_A
+        assert _parse_container_id(text) == _ID_A
+
+    def test_cgroup_v1_docker_path(self):
+        text = "12:memory:/docker/%s\n11:cpu:/docker/%s\n" % (_ID_B, _ID_B)
+        assert _parse_container_id(text) == _ID_B
+
+    def test_systemd_docker_scope(self):
+        text = "0::/system.slice/docker-%s.scope\n" % _ID_B
+        assert _parse_container_id(text) == _ID_B
+
+    def test_ignores_overlay_layer_hashes(self):
+        # Only overlay layer hashes present (no /containers/<id> or
+        # /docker/<id>) → no container id to report, must not grab a layer.
+        text = (
+            "600 500 0:60 / /var/lib/docker/overlay2/%s/merged "
+            "rw shared:1 - overlay overlay rw\n"
+        ) % _LAYER
+        assert _parse_container_id(text) is None
+
+    def test_cgroup_v2_bare_root_has_no_id(self):
+        assert _parse_container_id("0::/\n") is None
+
+
+class TestDetectOwnContainerId:
+    def test_prefers_first_path_that_yields_an_id(self, tmp_path):
+        cgroup = tmp_path / "cgroup"      # cgroup v2, no id
+        cgroup.write_text("0::/\n")
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text(
+            "1 1 0:1 /var/lib/docker/containers/%s/hostname /etc/hostname rw - x x rw\n"
+            % _ID_A
+        )
+        got = _detect_own_container_id(proc_paths=(str(cgroup), str(mountinfo)))
+        assert got == _ID_A
+
+    def test_missing_files_return_none(self, tmp_path):
+        assert _detect_own_container_id(
+            proc_paths=(str(tmp_path / "nope1"), str(tmp_path / "nope2"))
+        ) is None
+
+
+class TestOwnContainerResolution:
+    def _harness_with_fake_docker(self, get_impl):
+        from unittest.mock import MagicMock
+        h = _make_harness()
+        client = MagicMock()
+        client.containers.get.side_effect = get_impl
+        h._docker_client = client
+        return h
+
+    def test_resolves_live_id_when_hostname_is_stale(self, monkeypatch):
+        import trajectoryrl.utils.sandbox_harness as sh
+        sentinel = object()
+
+        def get(cid):
+            if cid == _ID_A:
+                return sentinel
+            raise _NotFound("No such container: %s" % cid)
+
+        h = self._harness_with_fake_docker(get)
+        monkeypatch.setattr(sh.os.path, "exists", lambda p: True)          # /.dockerenv
+        monkeypatch.setattr(sh, "_detect_own_container_id", lambda: _ID_A)  # live id
+        monkeypatch.setattr(sh.socket, "gethostname", lambda: "438b39003e95")  # stale
+        assert h._own_container() is sentinel
+
+    def test_falls_back_to_hostname_when_proc_has_no_id(self, monkeypatch):
+        import trajectoryrl.utils.sandbox_harness as sh
+        sentinel = object()
+
+        def get(cid):
+            if cid == "livehost":
+                return sentinel
+            raise _NotFound("No such container: %s" % cid)
+
+        h = self._harness_with_fake_docker(get)
+        monkeypatch.setattr(sh.os.path, "exists", lambda p: True)
+        monkeypatch.setattr(sh, "_detect_own_container_id", lambda: None)
+        monkeypatch.setattr(sh.socket, "gethostname", lambda: "livehost")
+        assert h._own_container() is sentinel
+
+    def test_none_when_not_in_docker(self, monkeypatch):
+        import trajectoryrl.utils.sandbox_harness as sh
+        h = self._harness_with_fake_docker(lambda cid: object())
+        monkeypatch.setattr(sh.os.path, "exists", lambda p: False)
+        assert h._own_container() is None
+
+    def test_logs_error_when_unresolvable_in_docker(self, monkeypatch, caplog):
+        import logging
+        import trajectoryrl.utils.sandbox_harness as sh
+
+        def get(cid):
+            raise _NotFound("No such container: %s" % cid)
+
+        h = self._harness_with_fake_docker(get)
+        monkeypatch.setattr(sh.os.path, "exists", lambda p: True)
+        monkeypatch.setattr(sh, "_detect_own_container_id", lambda: _ID_A)
+        monkeypatch.setattr(sh.socket, "gethostname", lambda: "stale")
+        with caplog.at_level(logging.ERROR, logger=sh.logger.name):
+            assert h._own_container() is None
+        # actionable: names the real failure mode, not a vague warning
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+        assert "meter" in caplog.text.lower()
